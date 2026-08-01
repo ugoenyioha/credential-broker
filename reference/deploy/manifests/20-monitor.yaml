@@ -1,0 +1,233 @@
+# ============================================================================
+# EPHEMERAL — zone boundary simulation. Label: zone-sim/ephemeral=true
+#
+# The MONITOR. Stands in for the TLS-decrypting traffic inspector.
+#
+# Sits between identity-zone and credential-zone. Every request from the broker side to the
+# exchange service traverses it, which is the property the NetworkPolicies in
+# 40-networkpolicies.yaml enforce and the boundary experiment verifies.
+#
+# NOTE ON TLS: the Warpgate -> switch-portal hop is PLAIN HTTP today (the portal
+# has no serving cert; LISTEN_ADDR=":8080"). So this runs in reverse HTTP mode
+# and decrypts nothing -- there is nothing to decrypt. That is itself a finding:
+# the threat model assumes TLS on a hop that does not have it. Adding TLS is a
+# later stage; do not let the absence of a CA here imply the analysis was wrong.
+#
+# ------------------------------------------------------------------ HYGIENE --
+# This pod is the most sensitive object in the simulation.
+#
+# DEFAULT (CAPTURE_TOKENS=false): logs a non-reversible fingerprint plus decoded
+# non-sensitive claims. That is sufficient to PROVE a middlebox can read the
+# token, without creating a store of live credentials.
+#
+# CAPTURE_TOKENS=true: additionally emits the raw token. Required for the replay
+# experiment. Off by default so enabling it is a deliberate act. Flows are held
+# in memory only -- do not add a volume or a -w flowfile.
+# ============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: monitor-addon
+  namespace: monitor-zone
+  labels:
+    zone-sim/ephemeral: "true"
+data:
+  observe.py: |
+    """mitmproxy addon: report what a middlebox on this hop can observe."""
+    import base64
+    import hashlib
+    import json
+    import os
+    from datetime import datetime, timezone
+
+    from mitmproxy import http
+
+    TOKEN_HEADER = os.environ.get("TOKEN_HEADER", "X-Portal-User-Token")
+    CAPTURE = os.environ.get("CAPTURE_TOKENS", "false").lower() == "true"
+    WATCH = [h.strip().lower() for h in os.environ.get(
+        "WATCH_HEADERS",
+        "x-portal-user-token,authorization,cookie,set-cookie,x-sim-probe",
+    ).split(",") if h.strip()]
+
+
+    def now():
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+    def emit(**kw):
+        kw.setdefault("ts", now())
+        kw.setdefault("svc", "monitor")
+        print(json.dumps(kw), flush=True)
+
+
+    def fp(v):
+        return hashlib.sha256(v.encode()).hexdigest()[:12]
+
+
+    def claims(tok):
+        """Decode a JWT payload without verifying. Observation only."""
+        try:
+            parts = tok.split(".")
+            if len(parts) != 3:
+                return None
+            pad = parts[1] + "=" * (-len(parts[1]) % 4)
+            c = json.loads(base64.urlsafe_b64decode(pad))
+            return {k: c[k] for k in ("aud", "sub", "exp", "iat", "scope", "azp")
+                    if k in c}
+        except Exception:  # noqa: BLE001
+            return None
+
+
+    def observed(headers):
+        out = {}
+        for name in WATCH:
+            if name in headers:
+                v = headers[name]
+                rec = {"present": True, "len": len(v), "fp": fp(v)}
+                c = claims(v)
+                if c:
+                    rec["decoded_claims"] = c
+                # For Cookie, the header staying present says nothing about WHICH
+                # cookies crossed: a target's own cookies keep it alive. Record the
+                # NAMES so "did the gateway's session cookie cross?" is answerable.
+                # Names only — values stay unrecorded.
+                if name in ("cookie", "set-cookie"):
+                    rec["cookie_names"] = sorted({
+                        p.split("=", 1)[0].strip()
+                        for p in v.split(";") if "=" in p
+                    })
+                if CAPTURE:
+                    rec["RAW"] = v
+                out[name] = rec
+        return out
+
+
+    def request(flow: http.HTTPFlow):
+        seen = observed(flow.request.headers)
+        # `observed` only ever covers WATCH_HEADERS, so it can never answer
+        # "was that ALL that crossed?" -- the unwatched majority is invisible.
+        # Record every header NAME (never a value) plus the request body size,
+        # so the claim about what does and does not cross is falsifiable.
+        emit(event="REQUEST", method=flow.request.method,
+             path=flow.request.path, observed=seen,
+             all_header_names=sorted({k.lower() for k in flow.request.headers.keys()}),
+             req_body_bytes=len(flow.request.content or b""),
+             note="everything in `observed` is readable by a middlebox here")
+
+
+    def response(flow: http.HTTPFlow):
+        seen = observed(flow.response.headers)
+        # The synthetic token rides in the body, not a header -- report shape.
+        body_n = len(flow.response.content or b"")
+        emit(event="RESPONSE", status=flow.response.status_code,
+             path=flow.request.path, observed=seen, body_bytes=body_n)
+
+
+    def load(loader):
+        emit(event="START", capture_tokens=CAPTURE, watching=WATCH,
+             warning=("RAW TOKEN CAPTURE IS ON" if CAPTURE
+                      else "fingerprints only; set CAPTURE_TOKENS=true to capture"))
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: monitor
+  namespace: monitor-zone
+  labels:
+    zone-sim/ephemeral: "true"
+    app: monitor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: monitor
+  template:
+    metadata:
+      labels:
+        zone-sim/ephemeral: "true"
+        app: monitor
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: mitmproxy
+          image: docker.io/mitmproxy/mitmproxy:11.0.0
+          # UPSTREAM_URL is env-driven so the monitor can be repointed after
+          # the real portal lands, without editing the manifest:
+          #   kubectl set env deploy/monitor -n monitor-zone \
+          #     UPSTREAM_URL=http://warpgate-switch-portal.credential-zone.svc.cluster.local:80
+          command: ["sh", "-c"]
+          args:
+            - |
+              exec mitmdump \
+                --mode "reverse:${UPSTREAM_URL}" \
+                --listen-host 0.0.0.0 \
+                --listen-port 8080 \
+                --set confdir=/tmp/mitmproxy \
+                --set termlog_verbosity=warn \
+                --set flow_detail=0 \
+                -s /addon/observe.py
+          env:
+            # STAGE 1: the stub, so boundary policy can be validated standalone
+            # BEFORE the live broker is touched. Repoint after the move.
+            #
+            # !! RE-APPLYING THIS MANIFEST RESETS THIS VALUE TO THE STUB !!
+            # It has silently broken the chain once: an unrelated edit to the
+            # addon above was rolled out with `kubectl apply -f`, which also
+            # reverted a `kubectl set env` repoint. The symptoms are subtle --
+            # switch-portal stops logging entirely and every response becomes a
+            # 145-byte "zone-sim stub upstream. Not a real appliance." page,
+            # while REQUEST observations at the boundary still look perfectly
+            # normal, because they are recorded before forwarding.
+            #
+            # After ANY `kubectl apply` of this file, re-run:
+            #   kubectl set env deploy/monitor -n monitor-zone \
+            #     UPSTREAM_URL=http://warpgate-switch-portal.credential-zone.svc.cluster.local:80
+            # and confirm with: the portal answers 403 "forbidden: no user
+            # identity" (28 bytes), NOT a 145-byte stub page.
+            - name: UPSTREAM_URL
+              value: "http://stub-upstream.credential-zone.svc.cluster.local:80"
+            - name: TOKEN_HEADER
+              value: "X-Portal-User-Token"
+            # Deliberately OFF. Enabling this creates a live credential log.
+            - name: CAPTURE_TOKENS
+              value: "false"
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: addon
+              mountPath: /addon
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests: { cpu: 25m, memory: 96Mi }
+            limits:   { cpu: 1000m, memory: 512Mi }
+      volumes:
+        - name: addon
+          configMap:
+            name: monitor-addon
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: monitor
+  namespace: monitor-zone
+  labels:
+    zone-sim/ephemeral: "true"
+spec:
+  selector:
+    app: monitor
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

@@ -1,0 +1,73 @@
+@startuml d1-deployment
+' Deployment view — the zones as actually built, with the network policies that
+' enforce them. Derived from reference/deploy/manifests: every policy named in
+' the legend exists in those files under that name.
+'
+' c0 shows intent. This shows what actually stops traffic when someone deploys a
+' pod in the wrong namespace — the policies ARE the boundary.
+
+skinparam backgroundColor #FDFDFB
+skinparam defaultFontName Helvetica
+skinparam shadowing false
+skinparam nodesep 12
+skinparam ranksep 22
+skinparam rectangle {
+  BorderColor #6A6A6A
+  FontColor #1A1A1A
+}
+skinparam note {
+  BackgroundColor #F4F1E6
+  BorderColor #B9B090
+  FontSize 11
+}
+skinparam ArrowColor #4A4A4A
+skinparam ArrowFontSize 11
+
+title Deployment view — zones, workloads, and the policies that enforce them
+
+rectangle "**IDENTITY ZONE**\nnamespace: identity-zone" as IZ #EEF3F8 {
+  rectangle "**gateway**\nauthenticates the person\nrecords the session\nforwards identity only" as GW
+}
+
+rectangle "**MONITOR ZONE**\nnamespace: monitor-zone" as MZ #F7F3E8 {
+  rectangle "**monitor**\ninspecting middlebox\nTLS terminated · full capture\ncaptures retained indefinitely" as MON
+}
+
+rectangle "**CREDENTIAL ZONE**\nnamespace: credential-zone" as CZ #EDF5EE {
+  rectangle "**broker**\nverifies the assertion\nexchanges it for the credential\nissues a capability" as BR
+  rectangle "**target stub**\nstands in for the appliance\nduring boundary tests" as ST
+}
+
+cloud "**Identity Provider**\nshort-lived, audience-bound tokens" as IDP #FFFFFF
+database "**Secret Store**\nlong-lived target credentials" as SS #FFFFFF
+node "**Target appliance**\nnative authentication only" as TGT #FFFFFF
+
+GW  -down->  MON : request + **token only**
+MON -down->  BR  : forwarded
+GW  -right[#8A8A8A,dashed]-> IDP : authenticate\n**by FQDN**
+BR  -right[#2E7D32]-> SS : **authorises the OPERATOR,**\n**not the workload**
+BR  -down[#2E7D32]-> TGT : native login\nusing the credential
+
+note right of SS #FFF9E8
+  Reached **without traversing the monitor**.
+
+  If the broker crossed the boundary to reach
+  the store, the credential would cross back the
+  other way and the design is defeated. Moving
+  the broker is not sufficient on its own.
+end note
+
+legend bottom
+|= zone |= policy |= what it enforces |
+| identity | **identity-ingress** | operators connect from outside the cluster |
+| identity | **identity-egress-via-monitor-only** | the only in-cluster egress is to monitor-zone |
+| identity | **identity-egress-idp-by-fqdn** (Cilium) | IdP reachable **by name, not address** — it shares a host with the secret store, so an IP rule would open both. Name-based keeps gateway → store denied |
+| monitor | **monitor-ingress-from-identity-only** | nothing but the identity zone may reach it |
+| monitor | **monitor-egress** | forwards to the credential zone |
+| credential | **default-deny-ingress** | deny first, then allow explicitly |
+| credential | **allow-portal-from-monitor-namespace** | the broker is reachable only via the monitor |
+| credential | **allow-stub-from-portal** | broker → target only |
+| credential | **credential-egress** | egress limited to DNS, the secret store, and the target |
+endlegend
+
+@enduml

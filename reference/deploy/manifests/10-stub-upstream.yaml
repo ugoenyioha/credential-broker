@@ -1,0 +1,352 @@
+# ============================================================================
+# EPHEMERAL — zone boundary simulation. Label: zone-sim/ephemeral=true
+#
+# Stub upstream. Stands in for the switch so the real device — which the
+# cluster is cabled through — is never in the experiment path.
+#
+# It does two jobs:
+#   1. Mimics the appliance API shape (PATCH /api/system/login returning the
+#      restful_res envelope, token_refresh, logout, boardinfo).
+#   2. Acts as the credential-side observation point: it logs which headers arrived,
+#      so boundary tests can assert what did and did not reach the credential side.
+#
+# switch-portal fetches from the REAL OpenBao (assumed credential-side by position;
+# its config does not change with placement), so the REAL appliance password
+# arrives here. The stub is therefore CREDENTIAL-BLIND: it never compares,
+# echoes, or logs any bytes of it -- only that one of some length arrived.
+#
+# The stub exists purely so experiments cannot wedge the live switch, which
+# the cluster is cabled through.
+#
+# TWO Services are exposed on purpose:
+#   stub-upstream  -> protected by a namespaceSelector policy  (proposed form)
+#   stub-weak      -> protected by a podSelector policy        (deployed form)
+# The pair exists so the label-spoof finding can be demonstrated WITHOUT
+# touching the live `warpgate` namespace.
+# ============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: stub-upstream-src
+  namespace: credential-zone
+  labels:
+    zone-sim/ephemeral: "true"
+data:
+  stub.py: |
+    #!/usr/bin/env python3
+    """Stub appliance for the zone boundary simulation. Stdlib only.
+
+    Deliberately NOT a faithful switch emulator -- it reproduces only the
+    request/response shapes switch-portal depends on, plus request logging.
+    """
+    import json
+    import os
+    import secrets
+    import sys
+    from datetime import datetime, timezone
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    LISTEN = int(os.environ.get("PORT", "8080"))
+    EXPECT_USER = os.environ.get("EXPECT_USER", "admin")
+    LABEL = os.environ.get("STUB_LABEL", "stub-upstream")
+
+    # Headers we care about proving arrived (or did not).
+    WATCH = ("x-portal-user-token", "authorization", "cookie", "x-sim-probe")
+
+    # CREDENTIAL-BLIND BY DESIGN.
+    # switch-portal fetches from the REAL OpenBao, so the REAL appliance
+    # password arrives here. This stub therefore never compares it against a
+    # known value, never echoes it, and never logs any bytes of it -- only
+    # that a credential of some length arrived. Do not add a prefix to the
+    # redaction, and do not add an EXPECT_PASS comparison.
+    def redact(v: str) -> str:
+        """Presence and length only. NEVER any bytes of the value."""
+        if not v:
+            return "<empty>"
+        return f"<present len={len(v)}>"
+
+
+    def now() -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        server_version = "zone-sim-stub"
+
+        # -- logging ---------------------------------------------------------
+        def log_message(self, fmt, *args):
+            pass  # replaced by structured logging below
+
+        def _observe(self, body=None):
+            seen = {}
+            for h in WATCH:
+                if h in self.headers:
+                    seen[h] = redact(self.headers[h])
+            rec = {
+                "ts": now(),
+                "stub": LABEL,
+                "method": self.command,
+                "path": self.path,
+                "peer": self.client_address[0],
+                "watched_headers": seen,
+                "body_bytes": len(body or b""),
+            }
+            print(json.dumps(rec), flush=True)
+
+        # -- helpers ---------------------------------------------------------
+        def _read(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            return self.rfile.read(n) if n else b""
+
+        def _send(self, code, payload, ctype="application/json"):
+            raw = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def _envelope(self, err, msg, **extra):
+            res = {"errCode": err, "message": msg, "utctimestamp": now()}
+            res.update(extra)
+            return {"restful_res": res}
+
+        # -- routes ----------------------------------------------------------
+        def do_PATCH(self):
+            body = self._read()
+            self._observe(body)
+
+            if self.path == "/api/system/login":
+                try:
+                    creds = json.loads(body or b"{}")
+                except json.JSONDecodeError:
+                    return self._send(400, self._envelope(2601, "bad json"))
+
+                user = creds.get("user", "")
+                pw = creds.get("password", "")
+
+                if user != EXPECT_USER:
+                    # errCode 2602 = unknown user, fires before password check
+                    return self._send(200, self._envelope(2602, "unknown user"))
+
+                # Deliberately NOT validated. We are proving that a credential
+                # traversed the credential side, not that it is the right one -- and
+                # comparing would require holding a copy of it.
+                if not pw:
+                    print(json.dumps({
+                        "ts": now(), "stub": LABEL, "event": "NO_CREDENTIAL",
+                        "note": "login arrived with an empty password field",
+                    }), flush=True)
+                    return self._send(200, self._envelope(2603, "empty password"))
+
+                token = secrets.token_urlsafe(99)[:132]
+                print(json.dumps({
+                    "ts": now(), "stub": LABEL, "event": "CREDENTIAL_ARRIVED",
+                    "credential": redact(pw),
+                    "note": "a credential reached the credential side and a session "
+                            "token was issued; value neither checked nor logged",
+                }), flush=True)
+                return self._send(200, self._envelope(
+                    0, "OK", token=token, timeout=300))
+
+            if self.path == "/api/token_refresh":
+                return self._send(200, self._envelope(
+                    0, "OK", token=secrets.token_urlsafe(99)[:132], timeout=300))
+
+            if self.path == "/api/system/logout":
+                return self._send(200, self._envelope(0, "OK"))
+
+            return self._send(404, self._envelope(404, "no such path"))
+
+        def do_GET(self):
+            self._observe()
+
+            if self.path == "/api/system/boardinfo":
+                return self._send(200, self._envelope(
+                    0, "OK", model="SIM-STUB", hwVersion="V2", runtimeImage="0.0.0-sim"))
+
+            if self.path in ("/healthz", "/readyz"):
+                return self._send(200, {"ok": True})
+
+            # Anything else: a minimal SPA-ish page. switch-portal injects its
+            # session bootstrap into this, so the injection path stays exercised.
+            html = (
+                "<!doctype html><html><head><title>zone-sim stub</title></head>"
+                "<body><div id='app'>zone-sim stub upstream. "
+                "Not a real appliance.</div></body></html>"
+            ).encode()
+            return self._send(200, html, ctype="text/html; charset=utf-8")
+
+        def do_POST(self):
+            self._observe(self._read())
+            return self._send(404, self._envelope(404, "no such path"))
+
+
+    if __name__ == "__main__":
+        print(json.dumps({
+            "ts": now(), "stub": LABEL, "event": "START", "port": LISTEN,
+        }), flush=True)
+        try:
+            ThreadingHTTPServer(("0.0.0.0", LISTEN), Handler).serve_forever()
+        except KeyboardInterrupt:
+            sys.exit(0)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stub-upstream
+  namespace: credential-zone
+  labels:
+    zone-sim/ephemeral: "true"
+    app: stub-upstream
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stub-upstream
+  template:
+    metadata:
+      labels:
+        zone-sim/ephemeral: "true"
+        app: stub-upstream
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: stub
+          image: docker.io/library/python:3.12-alpine
+          command: ["python3", "/src/stub.py"]
+          env:
+            - name: PORT
+              value: "8080"
+            - name: EXPECT_USER
+              value: "admin"
+            - name: STUB_LABEL
+              value: "stub-upstream"
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: src
+              mountPath: /src
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits:   { cpu: 200m, memory: 128Mi }
+      volumes:
+        - name: src
+          configMap:
+            name: stub-upstream-src
+---
+# Reached only via monitor-zone. Guarded by a namespaceSelector policy.
+apiVersion: v1
+kind: Service
+metadata:
+  name: stub-upstream
+  namespace: credential-zone
+  labels:
+    zone-sim/ephemeral: "true"
+spec:
+  selector:
+    app: stub-upstream
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# SEPARATE pods, deliberately. NetworkPolicy selects PODS, not Services -- and
+# when two policies select the same pod their ingress rules UNION. Sharing pods
+# between the strong and weak policies would silently grant the weak policy's
+# allowance to the strong Service too, and the isolation under test would not
+# exist. Hence a second Deployment.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stub-weak
+  namespace: credential-zone
+  labels:
+    zone-sim/ephemeral: "true"
+    app: stub-weak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stub-weak
+  template:
+    metadata:
+      labels:
+        zone-sim/ephemeral: "true"
+        app: stub-weak
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: stub
+          image: docker.io/library/python:3.12-alpine
+          command: ["python3", "/src/stub.py"]
+          env:
+            - name: PORT
+              value: "8080"
+            - name: EXPECT_USER
+              value: "admin"
+            - name: STUB_LABEL
+              value: "stub-weak"
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: src
+              mountPath: /src
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits:   { cpu: 200m, memory: 128Mi }
+      volumes:
+        - name: src
+          configMap:
+            name: stub-upstream-src
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stub-weak
+  namespace: credential-zone
+  labels:
+    zone-sim/ephemeral: "true"
+spec:
+  selector:
+    app: stub-weak
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

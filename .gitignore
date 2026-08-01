@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+
+# go build artefacts — 9MB binaries that also defeat text scanning
+/reference/broker/broker
+/reference/broker/switch-portal
+preview/

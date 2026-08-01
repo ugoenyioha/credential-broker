@@ -1,0 +1,50 @@
+# ============================================================================
+# EPHEMERAL — zone boundary simulation. Label: zone-sim/ephemeral=true
+#
+# THE CO-LOCATION PROBLEM, AND THE ONLY CLEAN ANSWER TO IT.
+#
+# idp.example.internal   -> 192.0.2.10
+# vault.example.internal -> 192.0.2.10      <-- SAME HOST
+#
+# WSO2 must be reachable from the identity side (operators authenticate to it, and
+# the broker redeems the authorization code on a back channel). OpenBao must
+# NOT be (only the credential-side exchange service should reach the appliance
+# credential). With one IP serving both, NO ipBlock rule can express that.
+#
+# Cilium proxies DNS and can match egress by FQDN, distinguishing the two even
+# on a shared address. This is the only way to keep the boundary meaningful
+# without re-hosting one of the services.
+#
+# LIMITATION, stated plainly: this is DNS-name enforcement. A client that
+# connects to the literal IP without resolving the permitted name is not
+# matched. It raises the bar; it is not equivalent to physical separation.
+# ============================================================================
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: identity-egress-idp-by-fqdn
+  namespace: identity-zone
+  labels:
+    zone-sim/ephemeral: "true"
+spec:
+  endpointSelector: {}
+  egress:
+    # DNS must be proxied by Cilium for toFQDNs to work at all.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s:k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: ANY }
+          rules:
+            dns:
+              - matchPattern: "*"
+    # The IdP, BY NAME. The secret store shares this IP and is NOT listed,
+    # so broker -> OpenBao stays denied even though broker -> WSO2 is allowed.
+    - toFQDNs:
+        - matchName: "idp.example.internal"
+      toPorts:
+        - ports:
+            - { port: "443", protocol: TCP }

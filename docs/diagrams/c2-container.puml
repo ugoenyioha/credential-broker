@@ -1,0 +1,45 @@
+@startuml c2-container
+!include <C4/C4_Container>
+
+title Container View — Credential Broker (all containers deploy INSIDE the credential zone)
+
+AddElementTag("hostile", $bgColor="#F7F3E8", $borderColor="#B08A3E")
+AddElementTag("isolated", $bgColor="#FBEEEA", $borderColor="#8C3A2B")
+
+Person(caller, "Caller", "Control plane in the identity zone, acting for an identified human.")
+System_Ext(inspector, "Monitor (inspecting middlebox)", "Sees every byte between the zones. Captures are permanent.", $tags="hostile")
+System_Ext(idp, "Identity Provider", "Signs the access token. Publishes JWKS.")
+System_Ext(vault, "Secret Store", "Long-lived target credentials, plus the per-subject policies that govern them.")
+System_Ext(target, "Target System", "Vendor appliance or device.")
+
+System_Boundary(broker, "Credential Broker") {
+  Container(api, "Broker Service", "Stateless service", "Validates the token, resolves the grant, enforces the destination allowlist, proxies the caller's request with the target's session credential injected. Never returns a secret.")
+  Container(ceremony, "Ceremony Registry", "Platform-owned, reviewed", "Declarative login ceremonies: endpoint, request shape, where the credential is placed, where the session credential is found, refresh. Tenants may CONTRIBUTE a ceremony; the platform reviews, owns and executes it. No tenant code runs here.", $tags="isolated")
+  ContainerDb(caps, "Capability Store", "Short-lived state", "Live target sessions and issued capabilities, each bound to a subject, a destination and an expiry. Revocable.")
+  Container(audit, "Audit Stream", "Append-only", "One event per decision, attributed to the VERIFIED subject from the token — never to a header asserted by an upstream proxy.")
+}
+
+Rel(caller, inspector, "Request + short-lived access token", "HTTPS")
+Rel(inspector, api, "Forwarded — a token is the only credential visible on this hop", "HTTPS")
+Rel(api, idp, "Fetches signing keys, validates signature / expiry / audience / scope", "JWKS")
+Rel(api, vault, "Authenticates AS THE CALLER, then reads only paths the grant allows", "HTTPS, in-zone")
+Rel(api, caps, "Mints, looks up and revokes capabilities")
+Rel(api, ceremony, "Loads the reviewed ceremony for this target class")
+Rel(api, target, "Native login, then proxied requests with the session credential injected", "in-zone")
+
+Rel(api, audit, "Decision events")
+Rel(api, caller, "Capability — subject-bound, destination-bound, expiring", "HTTPS")
+
+note right of ceremony
+  There is deliberately NO arbitrary-code adapter tier.
+  Two were proposed and both failed review: a sandbox with
+  no egress (the adapter's own authorised channel defeats it),
+  and an opaque handle with platform-owned placement (if the
+  platform fixes the fields it already knows the ceremony;
+  if the adapter shapes them it can direct where the secret
+  lands). Unusual targets get a longer review, not an
+  execution surface.
+end note
+
+SHOW_LEGEND()
+@enduml

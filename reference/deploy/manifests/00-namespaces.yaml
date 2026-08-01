@@ -1,0 +1,70 @@
+# ============================================================================
+# EPHEMERAL — zone boundary simulation.
+#
+# These namespaces exist ONLY to simulate a identity / credential zone boundary so the
+# claims in config/example/ can be tested rather than
+# asserted. They are throwaway.
+#
+# EVERY object in this simulation carries:
+#     zone-sim/ephemeral: "true"
+# which is the single handle used by scripts/teardown.sh. If you add anything,
+# add that label, or teardown will leave it behind.
+#
+# These namespaces do NOT touch the live `warpgate` namespace. The simulation
+# runs its own copy of switch-portal against a STUB upstream, so the real
+# switch — which the cluster is cabled through — is never in the path.
+#
+# Teardown:  config/example/
+# ============================================================================
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: identity-zone
+  labels:
+    zone-sim/ephemeral: "true"
+    zone-sim/side: identity
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+  annotations:
+    zone-sim/purpose: >-
+      Simulated identity side. Stands in for operator + IdP + Warpgate broker.
+      Traffic leaving here must traverse monitor-zone to reach credential-zone.
+    zone-sim/lifecycle: "EPHEMERAL — delete with scripts/teardown.sh"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitor-zone
+  labels:
+    zone-sim/ephemeral: "true"
+    zone-sim/side: boundary
+    # NOTE: mitmproxy runs as uid 1000 but needs a writable confdir; baseline
+    # rather than restricted so the CA can be generated at start.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+  annotations:
+    zone-sim/purpose: >-
+      Simulated BOUNDARY. Holds the decrypting middlebox. This namespace is the
+      most sensitive object in the simulation — its pod sees live ID tokens in
+      cleartext. Restrict exec and log access accordingly.
+    zone-sim/lifecycle: "EPHEMERAL — delete with scripts/teardown.sh"
+    zone-sim/warning: >-
+      The monitor pod's transcript contains live credentials. Flows are kept in
+      memory only; do not add a persistent volume or -w flowfile.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: credential-zone
+  labels:
+    zone-sim/ephemeral: "true"
+    zone-sim/side: credential
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+  annotations:
+    zone-sim/purpose: >-
+      Simulated credential side. Holds the credential-exchange service and the STUB
+      upstream that stands in for the switch. Ingress is restricted to
+      monitor-zone only — that restriction is the property under test.
+    zone-sim/lifecycle: "EPHEMERAL — delete with scripts/teardown.sh"

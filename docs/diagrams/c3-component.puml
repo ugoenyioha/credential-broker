@@ -1,0 +1,44 @@
+@startuml c3-component
+!include <C4/C4_Component>
+
+title Component View — Broker Service request path
+
+AddElementTag("gate", $bgColor="#EAF0E6", $borderColor="#4A5D3A")
+AddElementTag("danger", $bgColor="#FBEEEA", $borderColor="#8C3A2B")
+
+Container_Ext(caller, "Caller", "identity zone")
+System_Ext(idp, "Identity Provider")
+System_Ext(vault, "Secret Store")
+System_Ext(target, "Target System")
+ContainerDb_Ext(caps, "Capability Store")
+Container_Ext(sandbox, "Adapter Sandbox")
+
+Container_Boundary(svc, "Broker Service") {
+  Component(validate, "Token Validator", "", "Signature, expiry, audience, scope. Establishes the ONLY identity this service will act on. Rejects before anything else runs.", $tags="gate")
+  Component(grant, "Grant Resolver", "", "Looks up what this subject may do: which credential paths, which destinations, which adapter, what ceiling on lifetime. Read-only to tenants.", $tags="gate")
+  Component(egress, "Destination Guard", "", "Refuses any request whose destination is not in the resolved grant. The control that stops a self-service tenant pointing a credential somewhere of its own choosing.", $tags="gate")
+  Component(cred, "Credential Resolver", "", "Authenticates to the secret store AS THE CALLER, not as the service. The store authorises the human; the pod is not the subject.")
+  Component(adapter, "Adapter Runtime", "", "Executes the target's login ceremony. Declarative for the common shapes; delegates to the sandbox otherwise.")
+  Component(session, "Session Manager", "", "Holds the target session, mints the capability bound to (subject, destination, expiry), refreshes and revokes.")
+  Component(scrub, "Egress Scrubber", "", "Strips everything the target does not need before the request leaves: the caller's token, gateway cookies, upstream identity headers. Verified by conformance test, not assumed.", $tags="danger")
+  Component(auditc, "Audit Emitter", "", "Emits the VERIFIED subject. Never an identity asserted by an upstream header.")
+}
+
+Rel(caller, validate, "request + access token")
+Rel(validate, idp, "JWKS")
+Rel(validate, grant, "verified subject")
+Rel(grant, egress, "allowed destinations")
+Rel(egress, cred, "destination permitted")
+Rel(cred, vault, "read, as the caller")
+Rel(cred, adapter, "credential")
+Rel(adapter, sandbox, "exotic ceremonies only")
+Rel(adapter, session, "target session")
+Rel(session, caps, "persist / revoke")
+Rel(session, scrub, "session credential to inject")
+Rel(scrub, target, "proxied request, minimal headers")
+Rel(session, caller, "capability, never a secret")
+Rel(validate, auditc, "")
+Rel(session, auditc, "")
+
+SHOW_LEGEND()
+@enduml

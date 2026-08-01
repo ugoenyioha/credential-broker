@@ -1,0 +1,329 @@
+# ============================================================================
+# EPHEMERAL — zone boundary simulation. Label: zone-sim/ephemeral=true
+#
+# The boundary itself. Enforced by Cilium (verified: cilium + cilium-envoy
+# DaemonSets in kube-system), so these are real controls, not decoration.
+#
+# THE PROPERTY UNDER TEST
+#   Traffic from identity-zone reaches credential-zone ONLY via monitor-zone.
+#   scripts/experiment-boundary.sh asserts this by trying to bypass.
+#
+# TWO POLICIES ON PURPOSE
+#   strong: namespaceSelector  -> guards `stub-upstream`. The proposed form.
+#   weak:   podSelector        -> guards `stub-weak`. Mirrors what is deployed
+#                                 in the live `warpgate` namespace today.
+#
+#   The pair lets the label-spoof finding be demonstrated HERE rather than
+#   against production. A pod created in credential-zone carrying `app: warpgate`
+#   satisfies the weak policy and fails the strong one -- which is the whole
+#   argument for namespace-as-anchor: pod labels are mutable by anyone with
+#   pod-create in the namespace; namespace membership is not.
+#
+# RESIDUAL GAP (state it, do not paper over it)
+#   Pod NetworkPolicy does not constrain hostNetwork pods or node-level access.
+#   Cilium can extend to host policies via CiliumClusterwideNetworkPolicy with
+#   a nodeSelector; that is deliberately NOT enabled here. Anything with a node
+#   is outside this model.
+# ============================================================================
+
+# ---------------------------------------------------------------- credential-zone ---
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: credential-zone
+  labels:
+    zone-sim/ephemeral: "true"
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+# STRONG. Namespace is the anchor; it cannot be forged by relabelling a pod.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-monitor-namespace
+  namespace: credential-zone
+  labels:
+    zone-sim/ephemeral: "true"
+    zone-sim/form: strong-namespaceselector
+  annotations:
+    zone-sim/note: >-
+      Guards stub-upstream. The only sanctioned path into the credential side.
+spec:
+  # Selects BOTH the stub and the real switch-portal. The portal is matched by
+  # its chart label, not `app:`, so an `app: stub-upstream`-only selector left
+  # it with no ingress rule at all -- default-deny then silently blackholed it.
+  # Written before the portal existed; a policy is only as current as the
+  # workloads it was authored against.
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [stub-upstream]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitor-zone
+      ports:
+        - port: 8080
+          protocol: TCP
+---
+# The portal -> appliance hop. Entirely CREDENTIAL-SIDE INTERNAL: it does not cross the
+# boundary and must not be constrained by it. This is the hop that carries the
+# real credential, which is exactly why it stays on one side of the monitor.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-stub-from-portal
+  namespace: credential-zone
+  labels:
+    zone-sim/ephemeral: "true"
+spec:
+  podSelector:
+    matchLabels:
+      app: stub-upstream
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: switch-portal
+      ports:
+        - port: 8080
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-portal-from-monitor-namespace
+  namespace: credential-zone
+  labels:
+    zone-sim/ephemeral: "true"
+    zone-sim/form: strong-namespaceselector
+  annotations:
+    zone-sim/note: >-
+      Same strong form, for the real switch-portal once it has been moved in.
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: switch-portal
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitor-zone
+      ports:
+        - port: 8080
+          protocol: TCP
+---
+# WEAK. Reproduces the live `warpgate` namespace rule: a bare podSelector with
+# no namespaceSelector, i.e. "any pod in THIS namespace wearing this label".
+# Present so its weakness can be shown without touching production.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-warpgate-label
+  namespace: credential-zone
+  labels:
+    zone-sim/ephemeral: "true"
+    zone-sim/form: weak-podselector
+  annotations:
+    zone-sim/note: >-
+      Guards stub-weak. Mirrors the deployed control. Satisfiable by anyone who
+      can create a pod in this namespace carrying app=warpgate.
+spec:
+  podSelector:
+    matchLabels:
+      app: stub-weak
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: warpgate
+      ports:
+        - port: 8080
+          protocol: TCP
+---
+# Credential side egress: DNS, and the REAL OpenBao. OpenBao is treated as credential-side
+# BY POSITION -- its config does not change with placement, so it is reached
+# at its real address and the portal->OpenBao hop never crosses the monitor.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: credential-egress
+  namespace: credential-zone
+  labels:
+    zone-sim/ephemeral: "true"
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.10/32
+      ports:
+        - { port: 443, protocol: TCP }
+    # The REAL appliance. This is the portal -> switch hop: it carries the actual
+    # credential and is credential-side internal, so it does not cross the monitor.
+    # Currently TLS with verification disabled, because the device serves an
+    # expired, hostname-mismatched certificate (CN=*.trendnet.com, expired
+    # 2025-05-19). That is a real finding, not an accepted state.
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.20/32
+      ports:
+        - { port: 443, protocol: TCP }
+    # Intra-namespace. Credential-side-internal traffic is not what the boundary
+    # restricts, and without this the label-spoof test is blocked by EGRESS
+    # before the podSelector INGRESS rule under test is ever evaluated.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: credential-zone
+      ports:
+        - { port: 8080, protocol: TCP }
+
+# --------------------------------------------------------------- identity-zone ---
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: identity-egress-via-monitor-only
+  namespace: identity-zone
+  labels:
+    zone-sim/ephemeral: "true"
+  annotations:
+    zone-sim/note: >-
+      The identity side may not address the credential side directly. Any egress toward
+      credential-zone must terminate on monitor-zone. Absence of an credential-zone rule here is
+      the control, and the boundary experiment asserts it.
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    # The ONLY sanctioned path downward.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitor-zone
+      ports:
+        - { port: 8080, protocol: TCP }
+    # WSO2, for OIDC login and the RFC 8693 token exchange. Identity-side peer.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 192.0.2.10/32
+              - 192.0.2.20/32
+      ports:
+        - { port: 443, protocol: TCP }
+    # The SSH target. Warpgate resolves this credential ITSELF via its vault
+    # backend, which is the documented contradiction: that path pulls the secret
+    # to the identity side by a route that never traverses the monitor. Opened so the
+    # behaviour can be observed rather than argued about.
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.20/32
+      ports:
+        - { port: 22, protocol: TCP }
+    # Intra-namespace. Identity-side-internal traffic is not what the boundary
+    # restricts, and without it the broker and the gateway cannot be reached
+    # from within their own namespace (probes, health checks, diagnostics).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: identity-zone
+      ports:
+        - { port: 8080, protocol: TCP }
+        - { port: 8888, protocol: TCP }
+        - { port: 2222, protocol: TCP }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: identity-ingress
+  namespace: identity-zone
+  labels:
+    zone-sim/ephemeral: "true"
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    # NO `from` selector, deliberately.
+    #
+    # `from: [namespaceSelector: {}]` matches only IN-CLUSTER sources. Traffic
+    # arriving from outside the cluster has no namespace, so it does NOT match
+    # -- which firewalls off the user-facing broker and its LoadBalancer.
+    # The identity side is where operators connect; it must accept external ingress.
+    - ports:
+        - { port: 8080, protocol: TCP }   # reserved (was: token-exchange gateway, never deployed)
+        - { port: 8888, protocol: TCP }   # warpgate HTTP
+        - { port: 2222, protocol: TCP }   # warpgate SSH
+
+# ------------------------------------------------------------ monitor-zone ---
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: monitor-ingress-from-identity-only
+  namespace: monitor-zone
+  labels:
+    zone-sim/ephemeral: "true"
+spec:
+  podSelector:
+    matchLabels:
+      app: monitor
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: identity-zone
+      ports:
+        - { port: 8080, protocol: TCP }
+---
+# Monitor egress: DNS + the credential side. Deliberately NO route to OpenBao.
+# See 45-monitor-egress-openbao.yaml for the variant that adds it -- that file
+# is the replay knob, and applying it is a deliberate act.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: monitor-egress
+  namespace: monitor-zone
+  labels:
+    zone-sim/ephemeral: "true"
+  annotations:
+    zone-sim/note: >-
+      Models a strict bump-in-the-wire with no independent reachability.
+      Under this policy the replay experiment should FAIL.
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: credential-zone
+      ports:
+        - { port: 8080, protocol: TCP }

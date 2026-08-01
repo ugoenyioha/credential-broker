@@ -1,0 +1,60 @@
+# ============================================================================
+# EPHEMERAL — zone boundary simulation. Label: zone-sim/ephemeral=true
+#
+# THE REPLAY KNOB. Apply and remove this file deliberately; it is a variable,
+# not part of the base setup.
+#
+# It grants the monitor egress to the REAL OpenBao. Applying it models an
+# inline appliance that has its own routing onto the credential-side network.
+# Removing it models a strict bump-in-the-wire.
+#
+# The point is to quantify how much the monitor's NETWORK PLACEMENT -- rather
+# than its token handling -- determines the blast radius:
+#
+#   WITHOUT this file : monitor holds a valid token and cannot redeem it.
+#                       Replay FAILS. Reachability is the control.
+#   WITH this file    : monitor holds a valid token and CAN redeem it.
+#                       Replay SUCCEEDS, and only cryptography would stop it
+#                       -- which is exactly what is absent today (finding 3.3).
+#
+# Run scripts/experiment-replay.sh under both conditions. The delta is the
+# result, and it is a deployment choice rather than an engineering project,
+# which makes it more actionable than the DPoP work.
+#
+#   apply:  kubectl apply  -f 45-monitor-egress-openbao.yaml
+#   revert: kubectl delete -f 45-monitor-egress-openbao.yaml
+# ============================================================================
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: monitor-egress-openbao-variant
+  namespace: monitor-zone
+  labels:
+    zone-sim/ephemeral: "true"
+    zone-sim/variant: monitor-can-reach-openbao
+  annotations:
+    zone-sim/note: >-
+      VARIANT. Grants the monitor independent reachability to OpenBao so the
+      replay experiment can succeed. Remove to restore bump-in-the-wire.
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: credential-zone
+      ports:
+        - { port: 8080, protocol: TCP }
+    # The variable under test.
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.10/32
+      ports:
+        - { port: 443, protocol: TCP }

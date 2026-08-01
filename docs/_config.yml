@@ -1,0 +1,12 @@
+title: Brokered credential access across an inspecting boundary
+description: >-
+  A pattern, and a measured reference implementation, for per-user access to a
+  device whose credential cannot be per-user — across a boundary that records
+  everything crossing it.
+theme: jekyll-theme-cayman
+show_downloads: false
+
+# Diagrams are committed as rendered SVG next to their PlantUML source, so the
+# site builds without a PlantUML step in CI.
+exclude:
+  - "*.puml"

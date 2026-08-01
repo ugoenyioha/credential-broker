@@ -1,0 +1,78 @@
+@startuml s1-sequence
+skinparam shadowing false
+skinparam defaultFontName Helvetica
+skinparam maxMessageSize 250
+skinparam sequence {
+  ArrowColor #333333
+  LifeLineBorderColor #9A9A9A
+  LifeLineBackgroundColor #FDFDFD
+  ParticipantBorderColor #4472A8
+  ParticipantBackgroundColor #F2F6FB
+}
+skinparam NoteBackgroundColor #FFF8E1
+skinparam NoteBorderColor #D4C48A
+
+title Request flow — the credential never crosses, and the caller never holds it
+
+actor "Caller" as CP
+participant "Identity\nProvider" as IDP
+participant "Monitor\n(inspecting middlebox)" as MONITOR
+participant "Credential\nBroker" as BR
+participant "Secret\nStore" as V
+participant "Target\nSystem" as T
+
+== Establish ==
+CP -> IDP        : authenticate the human
+IDP --> CP       : short-lived token — audience-bound, carries the scope\nthat represents "may use this credential"
+CP -> MONITOR        : request + token
+note over MONITOR #E8F0E4
+  All this hop ever carries is a token that expires.
+  A capture of it is worthless once it does.
+end note
+MONITOR -> BR        : forwarded
+
+BR -> BR         : validate signature, expiry, audience, scope\nthis is the ONLY identity the broker will act on
+BR -> BR         : resolve the grant — which credential paths,\nwhich destinations, what lifetime ceiling
+BR -> BR         : reject if the destination is not in the grant
+
+BR -> V          : authenticate AS THE CALLER, then read
+note over V
+  The store authorises the HUMAN, not the pod.
+  A compromised broker cannot read what the
+  caller was never entitled to.
+end note
+V --> BR         : credential
+
+BR -> T          : native login ceremony
+T --> BR         : target session, short-lived
+
+BR -> BR         : mint capability bound to\n(subject, destination, expiry)
+BR -> MONITOR        : capability
+MONITOR -> CP        : capability
+note over CP
+  The caller never receives the credential.
+  A stolen capability is bound to one subject,
+  one destination, and expires.
+end note
+
+== Use ==
+loop until the capability expires
+  CP -> MONITOR      : request + capability
+  MONITOR -> BR      : forwarded
+  BR -> BR       : strip the caller's token, upstream identity headers,\nand any gateway cookie — verified, not assumed
+  BR -> T        : proxied request, target session injected
+  T --> BR       : response
+  BR --> CP      : response
+end
+
+== Revoke ==
+CP -> BR         : release
+BR -> BR         : revoke the capability FIRST, atomically,\nand refuse all new work against it
+BR -> BR         : drain work already dispatched
+BR -> T          : end the target session ONLY when the last\ncapability referencing it is gone
+note over BR, T
+  Revocation is immediate BROKER-SIDE only. It cannot undo an
+  operation already dispatched to the target, and where a target
+  session is shared it outlives any single capability.
+end note
+@enduml

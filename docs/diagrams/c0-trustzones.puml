@@ -1,0 +1,58 @@
+@startuml c0-trustzones
+' Deliberately NOT standard C4. The single most important property of this
+' design is WHICH SIDE OF THE BOUNDARY each thing sits on, and no standard C4
+' level shows that.
+skinparam shadowing false
+skinparam defaultFontName Helvetica
+skinparam rectangle {
+  BorderColor #4472A8
+  BackgroundColor #FDFDFD
+  FontColor #141413
+}
+skinparam ArrowColor #333333
+skinparam NoteBackgroundColor #FFF8E1
+skinparam NoteBorderColor #D4C48A
+
+title Trust Zones — what may cross, and what may never
+
+rectangle "IDENTITY ZONE" as HIGH #EEF3FA {
+  rectangle "Caller\n(control plane acting for a human)" as CP
+  rectangle "Identity Provider" as IDP
+}
+
+rectangle "MONITOR ZONE" as MID #F7F3E8 {
+  rectangle "Monitor — inspecting middlebox\nTLS terminated · full packet capture\ncaptures retained indefinitely" as MONITOR
+}
+
+rectangle "CREDENTIAL ZONE" as LOW #F3F1EE {
+  rectangle "Credential Broker" as BR
+  rectangle "Secret Store" as V
+  rectangle "Target System" as T
+}
+
+CP -down-> MONITOR : short-lived access token
+MONITOR -down-> BR : token only
+BR -right-> V : credential read\n(never crosses)
+BR -down-> T : native auth\n(never crosses)
+BR -up-> MONITOR : capability\n(subject-bound, expiring)
+MONITOR -up-> CP : capability
+IDP .left. CP : issues token
+
+note right of MID
+  MAY cross this boundary:
+    • a short-lived, audience-bound access token
+    • a capability bound to subject + destination + expiry
+
+  MUST NEVER cross:
+    • the target credential
+    • anything derived from it that outlives the request
+    • the broker's own session credentials
+    • identity asserted anywhere but inside the signed token
+end note
+
+note bottom of LOW
+  Everything here is reachable only from inside the zone.
+  If the boundary is compromised, the attacker holds a token
+  that expires — not a password that does not.
+end note
+@enduml
