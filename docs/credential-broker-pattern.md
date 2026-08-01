@@ -203,7 +203,7 @@ else.
 | Bound to | Meaning |
 |---|---|
 | **Subject** | the authenticated person, taken from the verified assertion — never from a header or a request field |
-| **Destination** | one target, canonicalised at the moment of connection |
+| **Destination** | one target, canonicalised as late as the implementation allows — at the moment of connection if it can, at configuration time at minimum (§11) |
 | **Expiry** | short, and **not extendable by the holder** |
 
 One rule governs the expiry, and it is easy to get wrong: a capability must not outlive the

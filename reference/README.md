@@ -105,7 +105,7 @@ UPSTREAM_URL=https://192.0.2.20 \
 It will refuse to start if `REQUIRE_USER_TOKEN` is set without a key set, an
 issuer and an audience, or if `UPSTREAM_URL` names a destination no appliance
 could plausibly live on. That is deliberate — see the guards below. With those
-five set it listens on `:8080` and expects the caller's assertion in
+six set it listens on `:8080` and expects the caller's assertion in
 `X-Portal-User-Token`.
 
 To exercise it you need an assertion the configured issuer would sign. The tests
