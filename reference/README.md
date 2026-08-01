@@ -209,9 +209,20 @@ These mistakes are caught at startup rather than at first login, while nothing i
 | `{{if .User}}…{{end}}` | control flow can repeat a value |
 | `LOGIN_METHOD=GET` | must be `POST`, `PUT` or `PATCH` |
 
-**Where ceremonies stop.** A body template describes JSON bodies. A target that logs in with
-form encoding, XML, or a multi-step challenge-response handshake is outside what this expresses,
-and needs the concept extended rather than merely configured.
+**Where ceremonies stop.** This implementation renders JSON bodies, and escapes the two
+substitutions for a JSON string context. Two different things sit outside that, and only one is
+a real boundary:
+
+- **Another serialisation** — form encoding, XML. The same idea with a different escaper. A
+  production implementation would carry one escaper per content type and choose by
+  `Content-Type`. Deliberately not built here: it would add surface without testing anything the
+  JSON path has not already established.
+- **A challenge-response handshake** — the actual limit. If the credential is *computed with*
+  rather than placed — hashed against a server nonce — then something must execute, and a
+  template that substitutes text cannot express it. That is the adapter this design rejects, so
+  the honest options are to implement the scheme as first-party broker code or to treat the
+  target as out of scope. Accepting contributed code for it would give back the property the
+  ceremony grammar exists to protect.
 
 ## Running the tests
 
@@ -263,9 +274,10 @@ run means anything:
 - a workload-identity fallback exists (`ALLOW_MACHINE_CREDENTIAL`). It is off by default and
   cannot be combined with per-user mode — the two are mutually exclusive at startup
 - the paper claims a new target costs five parameters and no code. All five are configuration
-  here, the fifth as a ceremony (see [Writing a ceremony](#writing-a-ceremony)). The remaining
-  limit is what a ceremony can express: JSON login bodies. Form-encoded, XML, or
-  challenge-response logins still need code
+  here, the fifth as a ceremony (see [Writing a ceremony](#writing-a-ceremony)). This
+  implementation renders JSON bodies only — other serialisations are an escaper each, and a
+  challenge-response login needs first-party code because a template cannot express a
+  computation
 - renewal of the caller's assertion is implemented; its capture is verified, its firing is not
 - **§11's destination guard is implemented at startup, not at dial time.** Redirects are
   refused on every credential-carrying client (`refuseRedirects`, with a regression test
