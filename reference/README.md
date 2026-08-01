@@ -58,6 +58,25 @@ work.
 **5. The proxy.** Everything above is reachable through an ordinary reverse proxy once the
 pieces exist.
 
+## What this was tested against
+
+The pattern names roles, not products — a PAM gateway, an identity provider, a vault, a
+monitor, an appliance. Any implementation of those roles should work. But claims in the
+paper are only checkable if you know what produced them, so the stack behind the measured
+results was:
+
+| Role | Product |
+|---|---|
+| PAM gateway | Warpgate, with two patches contributed upstream — do not forward the gateway's own session cookie, and forward the SSO access token |
+| Identity provider | WSO2 Identity Server |
+| Vault | OpenBao (the code speaks the Vault HTTP API) |
+| Monitor | mitmproxy |
+| Appliance | a TRENDnet managed switch, whose admin UI is a single-page application — which is why §9 of the paper exists |
+
+Environment variables retain the `OPENBAO_` prefix because the code speaks that API
+specifically; renaming them to `VAULT_` would imply a portability the implementation has not
+been tested for.
+
 ## Prerequisites
 
 - **Go 1.24** or later (`go.mod` sets the floor)

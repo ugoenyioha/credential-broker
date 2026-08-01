@@ -78,7 +78,7 @@ traffic. But it does not inject a credential into a forwarded request. It
 *answers* the login request:
 
 1. It holds one authenticated upstream session, logging in itself with a credential
-   fetched from OpenBao at runtime.
+   fetched from the vault at runtime.
 2. When the SPA posts to the login endpoint, it ignores what was submitted and
    replies with the upstream's own login response, **token field replaced by an
    opaque synthetic token**.
@@ -401,7 +401,7 @@ is worth.
 
 But this must clear the "do not add services" bar, and there is a cheaper
 alternative: have the IdP issue a target-scoped token at authentication time — no
-new service, no new failure domain. Whether WSO2 can do this is **[U]** and
+new service, no new failure domain. Whether the identity provider can do this is **[U]** and
 untested. It is the cheapest falsifier available and should be run before any
 gateway work.
 
@@ -434,7 +434,7 @@ gateway work.
 - **[U]** Whether *analytics* (distinct from debug) can carry callout content.
   Documentation states masking does not affect data sent to analytics. Second
   channel, unanswered.
-- **[U]** Whether WSO2 can issue target-scoped, audience-bound tokens at login.
+- **[U]** Whether the identity provider can issue target-scoped, audience-bound tokens at login.
   Cheapest available falsifier; would settle §7's second case without deploying
   anything.
 - **[U]** Whether Apigee hybrid's runtime can operate with the management plane

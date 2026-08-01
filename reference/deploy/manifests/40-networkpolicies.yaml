@@ -177,7 +177,7 @@ spec:
     # The REAL appliance. This is the portal -> switch hop: it carries the actual
     # credential and is credential-side internal, so it does not cross the monitor.
     # Currently TLS with verification disabled, because the device serves an
-    # expired, hostname-mismatched certificate (CN=*.trendnet.com, expired
+    # expired, hostname-mismatched certificate (vendor CN, expired
     # 2025-05-19). That is a real finding, not an accepted state.
     - to:
         - ipBlock:

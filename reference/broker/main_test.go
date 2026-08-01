@@ -20,7 +20,7 @@ const (
 	appliancePasswd = "sup3r-secret-switch-password"
 )
 
-// fakeAppliance mimics the TRENDnet SPA API: PATCH /api/system/login returns a
+// fakeAppliance mimics a single-page appliance API: PATCH /api/system/login returns a
 // bearer token, and every other endpoint demands that exact token.
 func fakeAppliance(t *testing.T, hits *[]string) *httptest.Server {
 	t.Helper()

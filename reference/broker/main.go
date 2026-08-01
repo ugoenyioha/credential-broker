@@ -91,8 +91,10 @@ type config struct {
 	// credential. Authorisation is then per-user and decided by OpenBao, whose
 	// audit log names the actual human rather than a service account.
 	//
-	// userTokenHeader is where the broker puts it (Warpgate is configured with
-	// a custom header whose value is `${WARPGATE_SSO_ID_TOKEN}`).
+	// userTokenHeader is where the caller's assertion arrives. The PAM gateway is
+	// configured to inject a custom header carrying the SSO ACCESS token -- not the
+	// ID token, which is audience-bound to the gateway and must not be forwarded to
+	// a target (OWASP ASVS 5.0 V10).
 	userTokenHeader string
 
 	// Verification of the forwarded token on EVERY use. Empty jwksURL disables
