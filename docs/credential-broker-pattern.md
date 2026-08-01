@@ -108,7 +108,7 @@ sequenceDiagram
     end
 
     OP->>MON: request + assertion
-    Note right of MON: retained indefinitely.<br/>Security headers contain the assertion;<br/>arbitrary request bodies are outside the census.
+    Note right of MON: retained indefinitely.<br/>Security headers contain the assertion.<br/>Request bodies are outside the census.
     MON->>BR: forwarded
 
     rect rgb(237, 245, 238)
