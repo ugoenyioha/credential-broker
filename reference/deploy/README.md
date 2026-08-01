@@ -137,9 +137,10 @@ manifests/
   00-namespaces.yaml               three namespaces, ephemeral-labelled
   10-stub-upstream.yaml            stub switch; strong + weak pods
   20-monitor.yaml                  mitmproxy, UPSTREAM_URL env-driven
-  30-token-exchange.yaml           RFC 8693 gateway (passthrough by default)
+  30-broker.yaml                   the broker; all five per-target params as env
   40-networkpolicies.yaml          the boundary
   45-monitor-egress-openbao.yaml   replay knob — apply deliberately
+  50-fqdn-egress.yaml              CiliumNetworkPolicy, IdP egress by FQDN
 scripts/
   setup.sh                         stage 1: stubs + monitor + policies
   experiment-boundary.sh           T1-T4, no live component involved

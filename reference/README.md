@@ -209,6 +209,12 @@ These mistakes are caught at startup rather than at first login, while nothing i
 | `{{if .User}}…{{end}}` | control flow can repeat a value |
 | `LOGIN_METHOD=GET` | must be `POST`, `PUT` or `PATCH` |
 
+A deployable example of all five parameters set explicitly is in
+[`deploy/manifests/30-broker.yaml`](deploy/manifests/30-broker.yaml). It sets them even
+though the binary's defaults already match, because a deployment that states the
+appliance's contract can be reviewed and one that inherits it silently cannot — the
+knowledge otherwise exists only as a constant inside an image.
+
 **Where ceremonies stop.** This implementation renders JSON bodies, and escapes the two
 substitutions for a JSON string context. Two different things sit outside that, and only one is
 a real boundary:

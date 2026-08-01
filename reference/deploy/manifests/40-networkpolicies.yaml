@@ -57,11 +57,16 @@ spec:
   # it with no ingress rule at all -- default-deny then silently blackholed it.
   # Written before the portal existed; a policy is only as current as the
   # workloads it was authored against.
+  #
+  # `broker` was added when 30-broker.yaml landed, for exactly that reason:
+  # credential-zone default-denies ingress, so a new workload here is
+  # unreachable until it is named. The failure is silent -- the pod runs and
+  # reports healthy while nothing can reach it.
   podSelector:
     matchExpressions:
       - key: app
         operator: In
-        values: [stub-upstream]
+        values: [stub-upstream, broker]
   policyTypes: [Ingress]
   ingress:
     - from:

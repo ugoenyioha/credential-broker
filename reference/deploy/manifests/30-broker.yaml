@@ -1,0 +1,180 @@
+# ============================================================================
+# The broker itself, deployed into the credential zone.
+#
+# The other manifests build the zones and the stub appliance; this one runs the
+# thing the pattern is about. It exists mainly to make ONE claim concrete: that
+# onboarding a target is configuration, not code.
+#
+# Every per-target parameter is an environment variable below, and there are
+# five of them. Nothing here is compiled in. To point this broker at a
+# different appliance you edit this file -- you do not rebuild the image.
+#
+# PLACEMENT IS THE ARCHITECTURE. This runs in credential-zone, never in
+# identity-zone beside the gateway. A broker that resolves the appliance
+# credential in the identity zone would put that credential on the wrong side
+# of the monitor, which is the one arrangement the design forbids.
+# ============================================================================
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: broker
+  namespace: credential-zone
+  labels:
+    app: broker
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: broker
+  namespace: credential-zone
+  labels:
+    app: broker
+spec:
+  selector:
+    app: broker
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: broker
+  namespace: credential-zone
+  labels:
+    app: broker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: broker
+  template:
+    metadata:
+      labels:
+        app: broker
+    spec:
+      serviceAccountName: broker
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: broker
+          image: broker:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: LISTEN_ADDR
+              value: ":8080"
+
+            # ---- THE FIVE PER-TARGET PARAMETERS -------------------------
+            #
+            # This block is the entire cost of onboarding a target. It is
+            # deliberately set explicitly even though the binary ships
+            # defaults that match: a deployment that STATES the appliance's
+            # contract can be read and reviewed, one that inherits it
+            # silently cannot.
+            #
+            # 1. Where the login lives.
+            - name: LOGIN_PATH
+              value: "/api/system/login"
+            #
+            # 2. The SHAPE of the login request -- a ceremony.
+            #
+            # A ceremony DESCRIBES the request; it is not code that performs
+            # it. The grammar admits literal text and exactly two
+            # substitutions, with the credential permitted exactly once. The
+            # broker supplies the credential, renders this template, and
+            # owns the destination -- which it builds from UPSTREAM_URL and
+            # LOGIN_PATH. There is no field here with which to name one, so
+            # a contributed ceremony cannot redirect the credential
+            # anywhere, and cannot duplicate it.
+            #
+            # A malformed ceremony is refused at STARTUP, not at first
+            # login, so the failure happens while nothing is at stake rather
+            # than while the broker is holding the appliance password.
+            #
+            # Two other real shapes, unchanged except for this value:
+            #   F5 BIG-IP     LOGIN_METHOD=POST
+            #                 LOGIN_PATH=/mgmt/shared/authn/login
+            #     {"username":"{{.User}}","password":"{{.Password}}","loginProviderName":"tmos"}
+            #   FortiManager  LOGIN_METHOD=POST  LOGIN_PATH=/jsonrpc
+            #                 TOKEN_FIELD=session
+            #     {"id":1,"method":"exec","params":[{"url":"/sys/login/user",
+            #      "data":{"user":"{{.User}}","passwd":"{{.Password}}"}}]}
+            - name: LOGIN_METHOD
+              value: "PATCH"
+            - name: LOGIN_BODY
+              value: '{"user":"{{.User}}","password":"{{.Password}}"}'
+            #
+            # 3. Where the session credential sits in the login RESPONSE.
+            #    The response is passed through otherwise untouched, so the
+            #    appliance's envelope does not have to be modelled -- only
+            #    the one field to substitute needs naming.
+            - name: TOKEN_FIELD
+              value: "token"
+            #
+            # 4. Its lifetime, read from the target rather than assumed.
+            - name: TIMEOUT_FIELD
+              value: "timeout"
+            #
+            # 5. How to refresh it.
+            - name: REFRESH_PATH
+              value: "/api/token_refresh"
+            # -------------------------------------------------------------
+
+            # The destination. Validated at startup: a non-HTTP scheme, a
+            # missing host, or a loopback / link-local / unspecified /
+            # multicast address refuses to start. 169.254.169.254 is the
+            # case that matters -- the cloud metadata service.
+            - name: UPSTREAM_URL
+              value: "http://stub-upstream.credential-zone.svc.cluster.local"
+            - name: SWITCH_USERNAME
+              value: "admin"
+
+            # PER-USER AUTHORISATION. The secret store authorises the
+            # OPERATOR, not this pod. That is what makes access
+            # attributable: a vault that authenticates the workload knows a
+            # machine asked; one that authenticates the person knows who.
+            - name: REQUIRE_USER_TOKEN
+              value: "true"
+            - name: USER_TOKEN_HEADER
+              value: "X-Portal-User-Token"
+            # All three are mandatory in per-user mode and startup fails
+            # without them. Audience was once optional, and unset it did not
+            # weaken verification loudly -- the check was SKIPPED, so a token
+            # minted for a different relying party verified here with the
+            # correct signature and issuer.
+            - name: OIDC_JWKS_URL
+              value: "https://idp.example.internal/oauth2/jwks"
+            - name: OIDC_ISSUER
+              value: "https://idp.example.internal/oauth2/token"
+            - name: OIDC_AUDIENCE
+              value: "urn:example:appliance-credential"
+
+            - name: OPENBAO_ADDR
+              value: "https://vault.example.internal"
+            - name: OPENBAO_JWT_MOUNT
+              value: "oidc"
+            - name: OPENBAO_JWT_ROLE
+              value: "broker"
+            - name: OPENBAO_SECRET_PATH
+              value: "kv/data/example/appliance/admin"
+            - name: OPENBAO_SECRET_FIELD
+              value: "password"
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
