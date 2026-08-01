@@ -123,7 +123,7 @@ sequenceDiagram
     BR-->>MON: capability
     MON-->>OP: capability
 
-    Note over OP,BR: capability — matched to asserted subject,<br/>destination, expiry; not sender-constrained
+    Note over OP,BR: capability — matched to asserted subject,<br/>destination and expiry. Not sender-constrained.
 
     loop each subsequent request
         OP->>MON: request + assertion + capability
