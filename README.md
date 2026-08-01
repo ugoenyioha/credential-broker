@@ -109,6 +109,12 @@ Two habits are worth stealing regardless of whether you use this pattern:
   meaningless unless the same scan has been shown to catch a planted canary. The
   sanitiser in this repo (`sanitize.py`) refuses to report a pass unless its own
   canaries are detected first.
+- **A clean working tree is not a clean push.** `sanitize.py` scanned the tree
+  and reported PASS while three commits still carried the real vault path — the
+  substitution rule had missed it (KV v2 puts `/data/` in the middle of the
+  path), the tree was fixed, and the commits that already had it were not. It
+  now scans every blob in every commit, and refuses to pass on history it has
+  not cleared.
 - **A checker must refuse what it cannot read, not skip it.** `sanitize.py` scans
   text. It cannot read a screen recording, where an operator name or a product
   identifier lives in pixels — so it now *fails* on video rather than skipping

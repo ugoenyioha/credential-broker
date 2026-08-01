@@ -136,6 +136,44 @@ def scan(root: pathlib.Path):
     return hits
 
 
+def scan_history():
+    """Scan every blob in every commit, not just the working tree.
+
+    A push publishes HISTORY. The working-tree scan above cannot see a secret
+    that was committed and later removed, and that is exactly how this
+    repository leaked once: a substitution rule missed the real vault path
+    (kv/data/... -- KV v2 puts /data/ in the middle), the tree was fixed, and
+    the commits that already carried it were not. A gate that clears the tree
+    and stays silent about history is a gate that reports PASS on the artefact
+    it was not looking at.
+
+    sanitize.py is excluded for the same reason the tree scan excludes it: the
+    detector necessarily contains every pattern it detects.
+    """
+    import subprocess
+
+    def git(*args):
+        return subprocess.run(["git", *args], capture_output=True, text=True).stdout
+
+    shas = git("rev-list", "--all").split()
+    if not shas:
+        return [], 0
+
+    hits = []
+    for sha in shas:
+        for path in git("ls-tree", "-r", "--name-only", sha).splitlines():
+            if not path or path == "sanitize.py":
+                continue
+            suffix = pathlib.PurePath(path).suffix.lower()
+            if suffix in SKIP_SUFFIX or suffix in UNSCANNABLE_SUFFIX:
+                continue
+            blob = git("show", f"{sha}:{path}")
+            for f in FORBIDDEN:
+                if re.search(f, blob, re.IGNORECASE):
+                    hits.append((f"{sha[:8]}:{path}", f))
+    return hits, len(shas)
+
+
 # Canaries sanitize() is expected to REWRITE. Failure here means the rewrite
 # rules have drifted from the detector.
 REWRITABLE = [
@@ -203,11 +241,21 @@ def main():
     if "--check" in sys.argv:
         hits = scan(root)
         if hits:
-            print(f"  FAIL: {len(hits)} forbidden hit(s)")
+            print(f"  FAIL: {len(hits)} forbidden hit(s) in the working tree")
             for p, f, n in hits[:40]:
                 print(f"    {p}: /{f}/ x{n}")
             return 1
-        print("  PASS: no forbidden identifiers in the reference copy")
+        print("  PASS: no forbidden identifiers in the working tree")
+
+        # A clean tree is not a clean push.
+        hhits, ncommits = scan_history()
+        if hhits:
+            print(f"  FAIL: {len(hhits)} forbidden hit(s) in git HISTORY")
+            for where, f in hhits[:40]:
+                print(f"    {where}: /{f}/")
+            print("  A push publishes history. Purge before publishing.")
+            return 1
+        print(f"  PASS: no forbidden identifiers across {ncommits} commits of history")
         return 0
 
     print("  usage: sanitize.py --check")
