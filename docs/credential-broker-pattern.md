@@ -208,6 +208,29 @@ sequenceDiagram
 
 Steps 7 through 11 are the substitution: the broker discards what the browser submitted, performs its own login, and replaces the appliance's token before replying. Machine callers need none of this. Browser callers cannot work without it. That is a line between two kinds of broker, not a wrinkle in one.
 
+## What you are actually signing up for
+
+Read the diagram again and notice what it commits you to. The browser holds a token that means nothing to the appliance, so **every subsequent request has to pass through the component holding the mapping**. The broker is not a login-time helper you call once and step out of the way. It is on the request path for the life of the session, and for every session.
+
+That makes it four things, not one:
+
+- a **reverse proxy**, forwarding requests
+- a **request terminator**, answering the login itself instead of forwarding it
+- a **response rewriter**, parsing the appliance's own body and substituting a field
+- a **stateful adapter**, holding the synthetic-to-real mapping per subject, plus a long-lived upstream session independent of any caller
+
+A gateway gives you the first. The other three are code you write, and they are where the difficulty actually sits — which is why [the evaluation](gateway-evaluation.html) concludes this is not a gateway-shaped problem.
+
+Three consequences follow, and they are the real cost of the pattern:
+
+**It is infrastructure.** In-path for every request means an outage stops all work, not just new logins. Size it knowing it sits on the critical path for the entire estate behind it.
+
+**It is a valuable target.** Holding a live appliance session and the ability to fetch more makes the broker a larger prize than any single capability it issues. What an attacker actually gets is set out below.
+
+**It does not scale for free.** Our synthetic-token state is a subject-bound map in one process's memory. **[V]** State dies with the process — operators log in again — and cannot span replicas. Scaling out means moving it somewhere shared, which reintroduces exactly the keying hazard that disqualifies the off-the-shelf options: key it without the subject and it is a cross-user credential leak.
+
+None of that argues against the pattern. It argues for one team building it and others onboarding by configuration, rather than each team writing its own — which is the recommendation in the [appendix](appendix.html).
+
 ## Where the vault sits matters as much as where the broker sits
 
 Moving the broker to the far side feels like the whole job. It is not. If the broker then reaches back across the boundary to fetch the credential, the secret crosses in the other direction and the recording problem returns unchanged.
@@ -297,7 +320,7 @@ Shared upstream sessions are usually necessary, because many targets limit concu
 
 ### Bound everything
 
-The broker is in-path for every request, not just logins. Per-subject and per-target quotas, deadlines on every dependency, bounded capability state — without them, one tenant denies the whole estate. **[A]**
+Being in-path for every request has a second implication beyond availability: per-subject and per-target quotas, deadlines on every dependency, bounded capability state. Without them, one tenant denies the whole estate. **[A]**
 
 ### Decide who owns the assertion's lifetime
 
