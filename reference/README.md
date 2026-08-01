@@ -58,20 +58,54 @@ work.
 **5. The proxy.** Everything above is reachable through an ordinary reverse proxy once the
 pieces exist.
 
+## Prerequisites
+
+- **Go 1.24** or later (`go.mod` sets the floor)
+- For the simulation only: a Kubernetes cluster with a CNI that enforces
+  `NetworkPolicy`. The FQDN egress rule in `50-fqdn-egress.yaml` is a
+  `CiliumNetworkPolicy` — on a cluster without Cilium, that one policy will not
+  apply and the identity zone's egress will be broader than the design intends.
+- An OIDC issuer publishing a JWKS endpoint, and a secret store speaking the
+  OpenBao/Vault HTTP API.
+
+## Running it
+
+```bash
+cd broker
+go build -o broker .
+
+REQUIRE_USER_TOKEN=true \
+OIDC_JWKS_URL=https://idp.example.internal/oauth2/jwks \
+OIDC_ISSUER=https://idp.example.internal/oauth2/token \
+OIDC_AUDIENCE=urn:example:appliance-credential \
+OPENBAO_ADDR=https://vault.example.internal \
+UPSTREAM_URL=https://192.0.2.20 \
+./broker
+```
+
+It will refuse to start if `REQUIRE_USER_TOKEN` is set without a key set and
+issuer. That is deliberate — see the guards below. With those five set it listens
+on `:8080` and expects the caller's assertion in `X-Portal-User-Token`.
+
+To exercise it you need an assertion the configured issuer would sign. The tests
+do this with a local key pair; see `verify_testhelpers_test.go` for the shape.
+
 ## Configuration
 
 The full surface is in `loadConfig`. The ones that change behaviour rather than endpoints:
 
-| Variable | Effect |
-|---|---|
-| `REQUIRE_USER_TOKEN` | per-user mode. With this set, `OIDC_JWKS_URL` and `OIDC_ISSUER` are mandatory and startup **fails** without them |
-| `USER_TOKEN_HEADER` | where the forwarded assertion arrives |
-| `OIDC_JWKS_URL`, `OIDC_ISSUER`, `OIDC_AUDIENCE` | verification inputs; audience checking is skipped if unset, which you almost certainly do not want |
-| `OPENBAO_JWT_MOUNT`, `OPENBAO_JWT_ROLE` | the per-user exchange |
-| `ALLOW_MACHINE_CREDENTIAL` | enables the workload-identity fallback. Defaults to false, and is **mutually exclusive** with `REQUIRE_USER_TOKEN` — setting both refuses to start, because pre-warming the shared session with machine identity stops per-user authorisation gating the fetch |
-| `ALLOW_NO_GATEWAY_AUTH` | removes the requirement for a shared secret from the gateway. Off by design |
-| `LOGIN_PATH`, `TOKEN_FIELD`, `TIMEOUT_FIELD`, `REFRESH_PATH` | four of the five per-target parameters in the paper's §8. The fifth — **request shape** — is not configurable here: the login body is hardcoded as `{"user":…,"password":…}` JSON and the method as `PATCH`. A target using a different shape needs code, not configuration |
-| `SYNTHETIC_TOKEN_TTL` | lifetime of the handle given to the browser |
+Defaults below are the values in `loadConfig`. Blank means required.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `REQUIRE_USER_TOKEN` | `true` | per-user mode. With this set, `OIDC_JWKS_URL` and `OIDC_ISSUER` are mandatory and startup **fails** without them |
+| `USER_TOKEN_HEADER` | `X-Portal-User-Token` | where the forwarded assertion arrives |
+| `OIDC_JWKS_URL`, `OIDC_ISSUER`, `OIDC_AUDIENCE` | — | verification inputs; audience checking is skipped if unset, which you almost certainly do not want |
+| `OPENBAO_JWT_MOUNT`, `OPENBAO_JWT_ROLE` | `oidc`, `switch-portal` | the per-user exchange |
+| `ALLOW_MACHINE_CREDENTIAL` | `false` | enables the workload-identity fallback. Defaults to false, and is **mutually exclusive** with `REQUIRE_USER_TOKEN` — setting both refuses to start, because pre-warming the shared session with machine identity stops per-user authorisation gating the fetch |
+| `ALLOW_NO_GATEWAY_AUTH` | `false` | removes the requirement for a shared secret from the gateway |
+| `LOGIN_PATH`, `TOKEN_FIELD`, `TIMEOUT_FIELD`, `REFRESH_PATH` | `/api/system/login`, `token`, `timeout`, `/api/token_refresh` | four of the five per-target parameters in the paper's §8. The fifth — **request shape** — is not configurable here: the login body is hardcoded as `{"user":…,"password":…}` JSON and the method as `PATCH`. A target using a different shape needs code, not configuration |
+| `SYNTHETIC_TOKEN_TTL` | `15m` | lifetime of the handle given to the browser |
 
 Two guards are worth knowing because they are the ones that will stop you at startup:
 
@@ -136,4 +170,6 @@ run means anything:
   parameterises four; the login request shape is hardcoded. The claim holds for targets
   matching that shape and overstates for the rest
 - renewal of the caller's assertion is implemented; its capture is verified, its firing is not
+- SNMP, SSH and other non-HTTP targets are out of scope entirely — see Class C in the
+  paper's §8
 - identifiers throughout are documentation placeholders — nothing here is a live endpoint

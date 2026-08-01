@@ -43,7 +43,11 @@ SUBS = [
 
     # --- tenancy / naming -----------------------------------------------------
     ("urn:homelab:switch-credential", "urn:example:appliance-credential", False),
-    ("kv/talos/switch/admin",         "kv/example/appliance/admin",       False),
+    # NOTE: the real path carries a /data/ segment (KV v2). An earlier rule matched
+    # "kv/talos/..." and silently never fired. Match the shape, not a guess at it.
+    (r"kv/data/talos/[a-z/]*admin",   "kv/data/example/appliance/admin",  True),
+    (r"kv/talos/switch/admin",        "kv/example/appliance/admin",       True),
+    (r"config/example/[A-Za-z0-9_./-]*", "config/example/",                 True),
     ("kv/talos/warpgate/config",      "kv/example/gateway/config",        False),
     ("kubernetes",         "kubernetes",                       False),
     ("ai-forge/kubeopencode",         "example",                          False),
@@ -63,6 +67,8 @@ FORBIDDEN = [
     # source-specific framing and internal product names: these identify where
     # the problem came from even with no company name present.
     r"\bSXP\b", r"sentrywire", r"forensic",
+    # deployment-platform and private-repo paths: no legitimate use in this repo
+    r"talos",
 ]
 
 SKIP_SUFFIX = {".png", ".jpg", ".jpeg", ".gif", ".pdf", ".tar", ".gz", ".zip"}
