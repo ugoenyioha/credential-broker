@@ -101,6 +101,8 @@ func newTestPortal(t *testing.T, applianceURL, baoURL string) *portal {
 	cfg := &config{
 		upstreamURL:      u,
 		loginPath:        "/api/system/login",
+		loginMethod:      defaultLoginMethod,
+		loginBody:        defaultLoginBody,
 		logoutPath:       "/api/system/logout",
 		refreshPath:      "/api/token_refresh",
 		tokenField:       "token",

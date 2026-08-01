@@ -67,6 +67,27 @@ type config struct {
 	logoutPath  string
 	refreshPath string
 
+	// THE FIFTH PER-TARGET PARAMETER: the shape of the login request.
+	//
+	// This was hardcoded, which made a target with a different login body the
+	// one case that needed code rather than configuration. It does not: the
+	// shape is data. loginMethod is the verb; loginBody is a Go text/template
+	// rendered with .User and .Password.
+	//
+	// The security property is in WHO renders it. A contributor supplies the
+	// SHAPE; this service supplies the credential and owns the destination
+	// (upstreamURL + loginPath). A template has no field for the destination,
+	// so it cannot redirect where the body goes, and text/template performs no
+	// I/O, no exec and no network calls of its own. The worst a hostile
+	// template achieves is rearranging a body that was already going to the one
+	// place it was always going to be sent.
+	//
+	// That is why this is a ceremony and not an adapter. An adapter that RUNS
+	// beside the plaintext credential can send it anywhere the broker can
+	// reach; a template that merely DESCRIBES the request cannot.
+	loginMethod string
+	loginBody   string
+
 	// Where the token lives in the upstream login response. The response is
 	// passed through otherwise untouched, so we do not have to model the
 	// appliance's envelope — only find the one field to substitute.
@@ -132,6 +153,8 @@ func loadConfig() (*config, error) {
 	c := &config{
 		listenAddr:       env("LISTEN_ADDR", ":8080"),
 		loginPath:        env("LOGIN_PATH", "/api/system/login"),
+		loginMethod:      env("LOGIN_METHOD", defaultLoginMethod),
+		loginBody:        env("LOGIN_BODY", defaultLoginBody),
 		logoutPath:       env("LOGOUT_PATH", "/api/system/logout"),
 		refreshPath:      env("REFRESH_PATH", "/api/token_refresh"),
 		tokenField:       env("TOKEN_FIELD", "token"),
@@ -182,6 +205,12 @@ func loadConfig() (*config, error) {
 		return nil, err
 	}
 	c.upstreamURL = u
+
+	// Same reasoning as the destination guard above: prove the login request is
+	// well formed now, not while holding the appliance password.
+	if err := validateLoginCeremony(c.loginMethod, c.loginBody); err != nil {
+		return nil, err
+	}
 
 	if c.openbaoAddr == "" {
 		return nil, errors.New("OPENBAO_ADDR is required")
@@ -591,9 +620,14 @@ func (s *upstreamSession) loginLocked(userToken string) (string, error) {
 		return "", fmt.Errorf("obtain appliance credential: %w", err)
 	}
 
-	body, _ := json.Marshal(map[string]string{"user": s.cfg.username, "password": password})
+	body, err := renderLoginBody(s.cfg.loginBody, s.cfg.username, password)
+	if err != nil {
+		return "", fmt.Errorf("render login ceremony: %w", err)
+	}
+	// The destination is ours, not the ceremony's. A template describes the
+	// body; it has no say in where that body is sent.
 	endpoint := s.cfg.upstreamURL.JoinPath(s.cfg.loginPath).String()
-	req, _ := http.NewRequest(http.MethodPatch, endpoint, strings.NewReader(string(body)))
+	req, _ := http.NewRequest(s.cfg.loginMethod, endpoint, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := s.client.Do(req)
@@ -1110,20 +1144,27 @@ func (p *portal) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// The login request is answered here, never forwarded. Whatever
 	// credentials the browser submitted are discarded unread.
-	case r.Method == http.MethodPatch && r.URL.Path == p.cfg.loginPath:
+	//
+	// The verb is the TARGET's, not ours: the SPA doing the asking is the
+	// appliance's own, so it uses the appliance's convention. Hardcoding PATCH
+	// here was the browser-facing half of the same gap that hardcoding the
+	// login body was on the upstream side -- a target whose SPA posts its login
+	// would fall through to the proxy and be forwarded with the operator's junk
+	// credentials instead of answered.
+	case r.Method == p.cfg.loginMethod && r.URL.Path == p.cfg.loginPath:
 		p.handleLogin(w, r)
 		return
 
 	// Refresh keeps the browser's handle alive. The upstream session is
 	// refreshed independently by ensure(), so this only re-issues a handle.
-	case r.Method == http.MethodPatch && r.URL.Path == p.cfg.refreshPath:
+	case r.Method == p.cfg.loginMethod && r.URL.Path == p.cfg.refreshPath:
 		p.handleLogin(w, r)
 		return
 
 	// Logout drops this browser's handle. It deliberately does NOT log out
 	// upstream: the appliance session is shared by every operator, so tearing
 	// it down would disconnect everyone else.
-	case r.Method == http.MethodPatch && r.URL.Path == p.cfg.logoutPath:
+	case r.Method == p.cfg.loginMethod && r.URL.Path == p.cfg.logoutPath:
 		if presented, ok := bearerOf(r.Header.Get("Authorization")); ok {
 			// Revoke ONLY a handle bound to the presenting subject. Revoking any
 			// presented handle let an observer on the wire kill the victim's

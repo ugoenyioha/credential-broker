@@ -152,7 +152,36 @@ Four vendors, one shape. Per-target knowledge reduces to five parameters:
 
     login path · request shape · where the session credential goes · TTL · refresh
 
-That is why this generalises: onboarding is configuration, not an integration project. Our implementation parameterises four of those five — the login request body is hardcoded, so a target with a different shape needs code. **[V]**
+That is why this generalises: onboarding is configuration, not an integration project. All five are configuration in the reference implementation. **[V]**
+
+### The fifth parameter is the interesting one
+
+The other four are strings. The request shape is a structure, and the temptation is to hardcode it — at which point the claim above is quietly untrue, because a target that spells its login body differently now needs a code change.
+
+The obvious fix is to let each team contribute an adapter: a small piece of code that knows how its appliance likes to be asked. Two versions of that idea fail, and the way they fail is what makes the third defensible.
+
+The first runs the adapter in a sandbox with no network access. This cannot work, and the reason is almost funny: the adapter's whole job is to talk to the appliance, so it needs an authorised outbound channel by construction. You cannot sandbox away the one capability you are required to grant. The adapter runs in the same process as a plaintext credential and is permitted to make network calls — the exfiltration path *is* the feature.
+
+The second gives the adapter an opaque handle instead of the credential, and has the platform substitute the real value wherever the adapter placed the handle. This is closer, but circular: to know where to substitute, the platform must understand the structure the adapter produced, and if it understands the structure, the adapter is not contributing anything the platform could not have done itself.
+
+What survives is inverting the direction. A team does not contribute code that *performs* the login; it contributes a description of what the login looks like:
+
+```
+{"user":"{{.User}}","password":"{{.Password}}"}
+{"username":"{{.User}}","password":"{{.Password}}","loginProviderName":"tmos"}
+{"id":1,"method":"exec","params":[{"url":"/sys/login/user",
+  "data":{"user":"{{.User}}","passwd":"{{.Password}}"}}]}
+```
+
+Those are the reference appliance, F5 BIG-IP, and FortiManager. **[D]** The third is the awkward one — the credential nested inside a JSON-RPC envelope under a different pair of key names — and it is the case a hardcoded flat body cannot express at all. All three reach a working login by configuration alone, each covered by a test that renders it and asserts the credential lands in the right place. **[V]**
+
+The security property comes from who does what. The contributor supplies the shape. The broker supplies the credential, renders the template, and owns the destination — which it builds from its own configured upstream, not from anything in the ceremony. So consider the hostile version: a ceremony that copies the credential into an extra field. It works. The copy is really there, and we do not strip it. It also does not matter, because the body still goes only where the broker sends it, and a ceremony has no way to name a destination. There is no URL field in the template; a template that writes `https://attacker.example` produces those characters as an inert string in a body already addressed elsewhere. Nothing dials it. Go's `text/template` performs no I/O, no process execution and no network calls of its own. **[V]**
+
+That distinction is sharper than "adapters are unsafe": the danger is not tenant contribution, it is running tenant *code* beside a plaintext credential. A description cannot exfiltrate, because a description does not execute. Contributors supply the shape of the request; they never touch the credential or the address.
+
+Two smaller properties follow. A malformed ceremony is rejected at startup rather than at first login, so a shape error surfaces while nothing is at stake instead of while the broker holds the appliance password — the same reasoning as the destination guard. And the credential is escaped for its JSON string context before the template runs, so a password containing quotes or braces stays one string value instead of becoming structure. The ceremony author cannot forget to escape, because the ceremony author never sees the raw value. **[V]**
+
+Where this stops: a target whose login is not a JSON body — form encoding, XML, a challenge-response handshake — is outside what a body template describes, and would need the ceremony concept extended rather than merely configured.
 
 **A2 is the class that will catch you.** PAN-OS documents its API key lifetime as defaulting to `0`: never expires. **[D]** A target that looks ideal — credential exchanges for a session, session goes in a header — can hand you a permanent credential instead, and now you have built a capability system on something that never expires. Treat A2 as Class B until you have read the lifetime off a real device.
 
