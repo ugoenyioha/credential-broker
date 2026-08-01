@@ -45,6 +45,25 @@ The second is what makes access attributable. A vault that authenticates the wor
 
 Three zones, named for the rule each enforces — **identity**, **monitor**, **credential**. Named that way, a credential appearing in the identity zone is self-evidently a violation. The monitor zone is named deliberately: it is the reason the pattern exists. (The pattern explains why "high side / low side" was rejected — the canonical usage would place the appliance credential in the zone called *low*.)
 
+## Onboarding a target, without writing code
+
+A broker is only worth building if the second target is cheaper than the first. Per-target knowledge here reduces to five parameters — the login path, the shape of the login request, where the session credential lives in the response, its TTL, and how to refresh it — and all five are configuration.
+
+The fourth and fifth are the interesting ones. The *shape* is contributed as a **ceremony**: a description of the login body, not code that performs the login.
+
+```
+{"user":"{{.User}}","password":"{{.Password}}"}
+{"username":"{{.User}}","password":"{{.Password}}","loginProviderName":"tmos"}
+{"id":1,"method":"exec","params":[{"url":"/sys/login/user",
+  "data":{"user":"{{.User}}","passwd":"{{.Password}}"}}]}
+```
+
+Those are the reference appliance, F5 BIG-IP, and FortiManager — the last nesting the credential inside a JSON-RPC envelope under different key names again. **[D]** All three reach a working login by configuration alone. **[V]**
+
+The tempting alternative is to let each team contribute an *adapter*: code that knows how its appliance likes to be asked. That fails, and instructively. Such an adapter runs in-process while the broker holds a plaintext credential, and its job is to talk to the appliance — so it needs an authorised outbound channel by construction. You cannot sandbox away the one capability you are required to grant.
+
+A ceremony inverts it. The contributor supplies the shape; the broker supplies the credential, renders the template, and owns the destination. The grammar admits only literal text and the two substitutions, with the credential permitted **exactly once**, so a contributed ceremony cannot duplicate it and has no field with which to name a destination. **[V]** The danger was never tenant contribution — it was running tenant *code* beside a plaintext credential. A description cannot exfiltrate, because a description does not execute.
+
 ## Why this is not header injection
 
 The obvious implementation injects an `Authorization` header into a proxied request. For **browser-facing** targets that cannot work, and the reason is structural:
