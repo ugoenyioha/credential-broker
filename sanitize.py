@@ -8,7 +8,7 @@ prefix of 192.168.1.206 — a naive ordered replace turns the latter into
 
 Run from the repo root:  python3 sanitize.py --check
 """
-import re, sys, pathlib, shutil
+import re, sys, pathlib, shutil, hashlib
 
 # (pattern, replacement, is_regex)
 SUBS = [
@@ -73,6 +73,33 @@ FORBIDDEN = [
 
 SKIP_SUFFIX = {".png", ".jpg", ".jpeg", ".gif", ".pdf", ".tar", ".gz", ".zip"}
 
+# Media that RENDERS TEXT A READER CAN SEE but that no text scan can read.
+# The scanner reports PASS on these because it skipped them, not because it
+# cleared them -- exactly the "watchlist proves presence, never absence" trap
+# the paper documents, turned on this repo's own gate. A screen recording can
+# carry an operator's name, an address, a hostname or a product identifier in
+# pixels, and every rule in FORBIDDEN is blind to all of it.
+#
+# So they are REFUSED rather than skipped. Committing one is a deliberate act
+# that requires frame-level review first, recorded here.
+UNSCANNABLE_SUFFIX = {".mp4", ".mov", ".webm", ".gif", ".avi", ".mkv", ".m4v"}
+
+# Media cleared by FRAME-LEVEL REVIEW, keyed by SHA-256 of the exact reviewed
+# bytes. Keyed by content, not by path: a path exception would silently bless
+# whatever file later appeared at that name, which is the failure this whole
+# gate exists to prevent. Re-encoding changes the hash and forces re-review.
+#
+# docs/demo.mp4 -- 1280x800, 32.7s. Reviewed frame by frame at 1 frame/3s:
+#   * operator display name blurred throughout
+#   * appliance serial / MAC / IP panel blurred throughout
+#   * no URL bar captured (viewport-only recording)
+#   * gateway product name and appliance model ARE visible, and that
+#     disclosure is intentional and approved.
+REVIEWED_MEDIA = {
+    "a5a1ce84f8fde50418dfdab44480fc1a0f6beec7e021e0e5b92138f74400cc9d":
+        "docs/demo.mp4 (frame-reviewed; PII blurred, product names intentional)",
+}
+
 
 def sanitize(text: str) -> str:
     for pat, rep, is_re in SUBS:
@@ -84,9 +111,19 @@ def scan(root: pathlib.Path):
     """Return [(path, pattern, count)] for every forbidden hit."""
     hits = []
     for p in sorted(root.rglob("*")):
-        if not p.is_file() or p.suffix.lower() in SKIP_SUFFIX:
+        if not p.is_file():
             continue
         if "/.git/" in str(p) or p.name == "sanitize.py":
+            continue
+        # Report unscannable media as a FAILURE unless its exact bytes have
+        # been cleared by frame-level review. A text scan cannot clear a video,
+        # so silently skipping one would let the gate pass a file it never read.
+        if p.suffix.lower() in UNSCANNABLE_SUFFIX:
+            digest = hashlib.sha256(p.read_bytes()).hexdigest()
+            if digest not in REVIEWED_MEDIA:
+                hits.append((p.relative_to(root), "UNSCANNABLE-MEDIA", 1))
+            continue
+        if p.suffix.lower() in SKIP_SUFFIX:
             continue
         try:
             t = p.read_text()
@@ -131,6 +168,27 @@ def self_test() -> bool:
         out = sanitize(c)
         if any(re.search(f, out, re.IGNORECASE) for f in FORBIDDEN):
             print(f"  SELF-TEST FAILED: sanitize() left a hit -> {out!r}")
+            return False
+
+    # Plant a real video and confirm scan() REFUSES it. Asserting the suffix is
+    # in a set would only test the set; this tests the code path that a
+    # committed recording would actually take.
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        probe = pathlib.Path(td)
+        (probe / "planted-demo.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42")
+        if not any(f == "UNSCANNABLE-MEDIA" for _, f, _ in scan(probe)):
+            print("  SELF-TEST FAILED: a video passed the gate unexamined")
+            return False
+
+    # ...and confirm the review allowance is bound to CONTENT, not to a name.
+    # A file wearing an approved filename but carrying different bytes must
+    # still be refused, or the allowance becomes a hole shaped like a path.
+    with tempfile.TemporaryDirectory() as td:
+        probe = pathlib.Path(td)
+        (probe / "demo.mp4").write_bytes(b"different bytes, same familiar name")
+        if not any(f == "UNSCANNABLE-MEDIA" for _, f, _ in scan(probe)):
+            print("  SELF-TEST FAILED: approval keyed by name, not content")
             return False
     return True
 
