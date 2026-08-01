@@ -18,6 +18,24 @@ Somewhere in that arrangement, a password crosses a recorder.
 That asymmetry is the whole problem. A token in a capture is a record of something that
 happened. A password in a capture is a door that is still open.
 
+## The pattern, working
+
+<video controls muted playsinline preload="metadata" width="100%"
+       style="max-width:900px;border:1px solid #eaecef;border-radius:6px;">
+  <source src="demo.mp4" type="video/mp4">
+  Your browser cannot play embedded video.
+  <a href="demo.mp4">Download the recording</a> instead.
+</video>
+
+An operator signs in with single sign-on, selects the appliance, and reaches its
+administrative interface — **without ever being sent, or typing, the appliance's password.**
+The broker exchanged the operator's identity for that credential on the far side of the
+boundary and used it there.
+
+The appliance's own login form never appears, because the broker answered it (§9). The
+operator's display name and the device's serial, MAC and address are blurred; nothing else
+is edited.
+
 ## Read
 
 - **[The pattern](credential-broker-pattern.html)** — the problem, the design, how to build
@@ -62,9 +80,12 @@ Machine callers need none of this; browser callers cannot work without it.
 
 ## How to read the claims
 
-Claims carry markers — **[M]** measured, **[D]** vendor documentation, **[C]** community or
-practitioner example, **[A]** reasoned but unverified, and in the evaluation **[V]** verified
-from source. Where a control was not proven, it says so.
+Every claim carries a marker saying how it is known, on one ordered scale: **[M]** measured,
+**[V]** verified from source, **[G]** verified from the GitHub API, **[D]** vendor
+documentation, **[C]** community or practitioner example, **[A]** reasoned but unverified,
+**[U]** open question. The full table is in
+[the pattern](credential-broker-pattern.html#how-to-read-the-claims). Where a control was not
+proven, it says so.
 
 ## On API gateways
 
@@ -83,17 +104,23 @@ question. The evaluation is explicit about which claims rest on which kind of so
 
 ## What was measured
 
-- A gateway session cookie crossed the boundary on **1001 of 1001** requests before the
-  fix, **0 of 365** after — carrying, on that hop, something more valuable than the secret
-  the design existed to protect.
-- A full header census found an unsigned identity header on **115 of 115** requests. The
-  receiving service authorised on the signed token but attributed its audit log to the
+- A gateway session cookie was crossing the boundary on every request observed — carrying,
+  on that hop, something more valuable than the secret the design existed to protect. On
+  the current deployment it crosses on **0 of 469** consecutive requests, while the
+  target's own cookies pass through as presented. **[M]** The pre-fix figure is reported
+  from a deployment that no longer exists and cannot be re-derived. **[U]**
+- A full header census found an unsigned identity header on every request observed. **[U]**
+  The receiving service authorised on the signed token but attributed its audit log to the
   unsigned one.
 - A forged assertion — correct shape, victim subject, future expiry, correct issuer and
-  audience, and the real published key id — was rejected with `signature does not verify`,
-  once signature checking was added on **every** use rather than at login only. That defect
-  was found by reading the authorisation path rather than by measuring the boundary; the
-  two activities catch different things.
+  audience, and the real published key id — is rejected with `signature does not verify`,
+  once signature checking is applied on **every** use rather than at login only. **[V]**
+  That defect was found by reading the authorisation path rather than by measuring the
+  boundary; the two activities catch different things.
+- The reference implementation followed HTTP redirects on the request that carries the
+  appliance password, so a redirect from the login endpoint replayed that password to the
+  redirect target. **[M]** Demonstrated, then fixed, with a regression test asserting the
+  redirect target receives nothing.
 
 ## Two rules worth stealing
 

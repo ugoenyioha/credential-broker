@@ -22,12 +22,29 @@ Read that sentence again and you will find a password crossing a recorder.
 
 That is the whole problem. Everything below is about what to do with it.
 
-Claims here are marked **[M]** measured in a working implementation, **[D]** taken from
-vendor documentation, **[A]** reasoned but unverified. Where a control was not proven, it
-says so. That distinction turns out to matter more than any argument in the paper. The
-findings that changed the design were not deduced from it — they were things a working
-system was doing that nobody had thought to look for, and one thing the design permitted
-that nobody had thought to try.
+### How to read the claims
+
+Every claim carries a marker saying how it is known. Where a control was not proven, it says
+so. That distinction turns out to matter more than any argument in the paper: the findings
+that changed the design were not deduced from it — they were things a working system was
+doing that nobody had thought to look for, and one thing the design permitted that nobody
+had thought to try.
+
+| Marker | Meaning | Strength |
+|---|---|---|
+| **[M]** | Measured in the deployed rig against the real appliance | observed |
+| **[V]** | Verified from source — the named repository at a pinned commit | read the code |
+| **[G]** | Verified from the GitHub API | checked externally |
+| **[D]** | Vendor documentation — the ceiling for a closed-source product | vendor's claim |
+| **[C]** | Community or practitioner example | weaker than vendor documentation |
+| **[A]** | Reasoned but unverified — an architectural consequence, not an observation | argument only |
+| **[U]** | Open question, stated as such | not known |
+
+The scale is ordered. **[M]** and **[V]** are things someone looked at; **[A]** is something
+someone worked out. A design argument that reads as convincingly as a measurement is exactly
+the thing this table exists to keep apart. This paper uses **[M]**, **[D]** and **[A]**; the
+[gateway evaluation](gateway-evaluation.html) exercises the rest, because assessing a
+closed-source product forces the weaker end of the scale into use.
 
 ---
 
@@ -102,12 +119,7 @@ can reach, and it still crosses to the device.
 
 Split the path at the boundary.
 
-```
-operator ──▶ gateway ──▶ [ boundary: records everything ] ──▶ broker ──▶ device
-                │                                                │
-        authenticates the person,                    exchanges that identity for the
-        forwards IDENTITY only                       credential, and uses it here
-```
+![Trust zones and the material permitted to cross between them](diagrams/c0-trustzones.svg)
 
 The gateway authenticates the person and forwards **only their identity**. On the far side
 of the boundary, a broker takes that identity, exchanges it for the device's credential,
@@ -205,6 +217,58 @@ And the trap that swallows otherwise-good designs:
 > equivalent — a long-lived session key, a non-expiring API key — has moved the problem,
 > not solved it.**
 
+### The lifecycle, end to end
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant OP as Operator
+    participant IDP as Identity<br/>Provider
+    participant MON as Monitor<br/>(inspecting)
+    participant BR as Credential<br/>Broker
+    participant SS as Secret<br/>Store
+    participant TG as Target
+
+    rect rgb(238, 243, 250)
+    Note over OP,IDP: identity zone — assertions only
+    OP->>IDP: authenticate
+    IDP-->>OP: assertion
+    end
+
+    OP->>MON: request + assertion
+    Note right of MON: retained indefinitely.<br/>This request contains only the assertion.
+    MON->>BR: forwarded
+
+    rect rgb(237, 245, 238)
+    Note over BR,TG: credential zone — fetched, used, and kept here
+    BR->>BR: verify assertion
+    BR->>SS: authorise as THE OPERATOR
+    SS-->>BR: target credential
+    BR->>TG: native login
+    TG-->>BR: target session
+    end
+
+    BR-->>MON: capability
+    MON-->>OP: capability
+
+    Note over OP,BR: capability — bound to subject, destination, expiry
+
+    loop each subsequent request
+        OP->>MON: request + assertion + capability
+        MON->>BR: forwarded
+        BR->>BR: re-verify assertion and binding
+        BR->>TG: request on held session
+        TG-->>BR: response
+        BR-->>MON: response
+        MON-->>OP: response
+    end
+```
+
+*Steps 1–11 establish: the operator authenticates, only the assertion crosses on the
+authentication request, and the broker exchanges it for the credential on the far side.
+Steps 12–18 are every request after that. Note step 14 — the assertion is re-verified on
+each use, not once at login. §11 explains why that distinction is load-bearing.*
+
 ## 8. Classify the target before you design for it
 
 Most of the apparent variety in managed equipment collapses once you ask the right
@@ -246,7 +310,7 @@ That is why this generalises: a handful of parameters rather than an integration
 One honest qualification. The reference implementation parameterises four of the five — it
 hardcodes the login **request shape**, so a target whose login body differs needs code
 rather than configuration. The claim holds for targets sharing a shape and overstates for
-the rest. **[M]**
+the rest. **[V]**
 
 ### A2 — the one that will catch you [D]
 
@@ -319,6 +383,48 @@ a response to that finding, not itself a measured result. **[A]**
 Machine callers do not need any of this. Browser callers cannot work without it. That is a
 line between two kinds of broker, not a wrinkle in one.
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Browser<br/>(the SPA)
+    participant BR as Credential<br/>Broker
+    participant TG as Appliance
+
+    Note over B,TG: the SPA has already decided it is logged out —<br/>it read its own storage before any request existed
+
+    B->>BR: GET / (the app document)
+    BR->>TG: GET /
+    TG-->>BR: HTML
+    BR->>BR: inject session bootstrap
+    BR-->>B: HTML + bootstrap
+
+    rect rgb(237, 245, 238)
+    Note over BR,TG: the broker answers the login rather than forwarding it
+    B->>BR: PATCH /login
+    BR->>BR: discard what was submitted
+    BR->>TG: PATCH /login with the fetched credential
+    TG-->>BR: token = REAL
+    BR->>BR: keep REAL, mint SYNTHETIC
+    BR-->>B: the appliance's own body,<br/>token replaced by SYNTHETIC
+    end
+
+    Note over B,BR: the browser holds a handle that is<br/>meaningless anywhere else
+
+    loop every subsequent request
+        B->>BR: request + SYNTHETIC
+        BR->>BR: swap SYNTHETIC for REAL
+        BR->>TG: request + REAL
+        TG-->>BR: response
+        BR-->>B: response
+    end
+```
+
+*Read steps 7–11 together. The broker discards the browser's submitted login material,
+performs its own upstream login, and replaces the appliance's real token before replying.
+Neither the password nor the session it unlocks reaches the browser. That is why a
+transparent proxy cannot serve this class of target: there is no point in the flow where
+injecting a header would have helped.*
+
 ### Where the vault sits matters as much as where the broker sits
 
 Moving the broker to the far side of the boundary feels like the whole job. It is not.
@@ -344,12 +450,39 @@ The monitor zone earns its place on that list. It is not scenery — it is the r
 pattern exists, and naming it keeps *"what is visible at the boundary?"* a structural
 question rather than an afterthought.
 
-![deployment view](diagrams/d1-deployment.svg)
+![Reference deployment showing Kubernetes namespaces, workloads, and external peers](diagrams/d1-deployment-diagrams.png)
 
-*The zones as actually deployed, with the network policies that enforce them. Every policy
-named there exists under that name in [`reference/deploy/manifests`](../reference/deploy/manifests/).
-The policies are the boundary: they are what stops traffic when a workload lands in the
-wrong zone, and they are the thing to inspect when the property is in doubt.*
+*The reference rig as actually built. The zones above are a trust model; the namespaces here
+are the thing that enforces it, and the two are not the same object — the identity provider,
+secret store and appliance sit in a zone but outside the cluster, so they appear as peers
+rather than workloads. Two details are the rig rather than the pattern: the inspected hop is
+plain HTTP, because the broker has no serving certificate, and the monitor holds flows in
+memory only. Both are deliberate, and §14's measurements were taken under exactly these
+conditions. The policies are the boundary: they are what stops traffic when a workload lands
+in the wrong namespace, and they are the thing to inspect when the property is in doubt.
+Every policy below exists under that name in `reference/deploy/manifests`.*
+
+| Zone | Policy | What it enforces |
+|---|---|---|
+| identity | `identity-ingress` | operators connect from outside the cluster |
+| identity | `identity-egress-via-monitor-only` | the only in-cluster egress is to the monitor zone |
+| identity | `identity-egress-idp-by-fqdn` | the identity provider is reachable by name, not address; an address rule would also expose the co-located secret store |
+| monitor | `monitor-ingress-from-identity-only` | nothing but the identity zone may reach it |
+| monitor | `monitor-egress` | forwards to the credential zone |
+| credential | `default-deny-ingress` | denies first, before explicit allowances |
+| credential | `allow-portal-from-monitor-namespace` | the broker is reachable only through the monitor |
+| credential | `allow-stub-from-portal` | permits the broker's test path to the target stub |
+| credential | `credential-egress` | limits egress to DNS, the secret store, and the target |
+
+Those are the policies that carry the argument, not the complete set: the namespaces also
+hold rules for intra-namespace traffic and a deliberately weak, forgeable one kept as a
+demonstration. Read the manifests for the whole picture.
+
+And a caution about the zone rule those policies enforce. **It holds for the broker path,
+not automatically for everything deployed in the zone.** The same rig runs a second path to
+the same appliance — SSH — on which the credential is resolved *into* the identity zone
+without crossing the monitor at all. §15 sets out that contradiction. A zone rule is a claim
+about paths that have been moved, and it stays false for every path that has not been.
 
 You may be wondering why not "high side / low side", which is standard and available. The
 canonical usage is that high means *more sensitive* — which would put the appliance
@@ -392,7 +525,9 @@ captured capability, and be accepted for the capability's remaining life. **[A]*
 
 With verification added on every use, a forgery carrying the correct shape, a victim
 subject, a future expiry, the correct issuer and audience, and the real published key id
-was rejected: `signature does not verify`. **[M]**
+was rejected: `signature does not verify`. **[V]** — the rejection is asserted by a
+regression test against a locally generated key pair, not by a transcript from the deployed
+rig.
 
 Note where this was found. It came from reading the authorisation path, not from measuring
 the boundary — the complement of §14, and the reason both activities are needed.
@@ -417,6 +552,27 @@ grant never intended, and redirects move the destination after the check has pas
 Canonicalise `(scheme, host, port, resolved address)` at the moment of connection, refuse
 redirects, and ignore caller-supplied `Host` or absolute-form request targets. Block
 loopback, link-local and control-plane ranges unless explicitly granted.
+
+Of those, **refusing redirects is the one with teeth, and the reference implementation
+originally did not do it. [M]** The login request carries the fetched credential in its
+*body*. A default Go HTTP client follows up to ten redirects and, for 307 and 308, replays
+the method and body on each hop — so a redirect from the login endpoint hands the appliance
+password to whatever host the redirect names. That was demonstrated against a client
+configured exactly as the broker's, and the credential arrived at the second hop intact.
+
+It is fixed: every client that carries credential material now refuses redirects, and a
+regression test asserts the redirect target received **nothing** — not merely that an error
+came back, since an error is also what you get *after* a leak. **[V]**
+
+Two things are worth taking from that beyond the fix. The control was written down as a rule
+that must hold and then not implemented, which is the ordinary way security controls go
+missing: nobody argued against it. And a network policy that confines egress to known hosts
+limits the blast radius, which is why this was survivable here — but the reference is what
+other deployments inherit, and they do not inherit that policy.
+
+The remaining controls in this paragraph — dial-time address canonicalisation, and blocking
+loopback, link-local and control-plane ranges — are **[A]** and **not implemented** in the
+reference. `reference/README.md` lists them among its known limits.
 
 ### Order revocation correctly
 
@@ -487,13 +643,24 @@ first — and the second is the one you built the audit trail for.
 
 ## 12. What a compromised broker means
 
-It is worth being blunt. A compromised broker holds every credential it has fetched, and
+It is worth being blunt. A compromised broker can read whatever credential material is in
+its memory — the live target session, and any credential it fetches from that point on — and
 can alter its own gates, scrubbing and audit. **[A]**
+
+The distinction matters for what an attacker gets. The appliance password is a transient
+local value on the login path, not a store the broker accumulates — so "every credential it
+has ever fetched" overstates it. What a compromised broker holds is the current session, and
+the ability to fetch again for as long as callers keep presenting assertions.
 
 "It authorises as the caller" limits it **only if** the secret store enforces exact-path
 grants independently, and the delegation is not a replayable bearer token. That is a
 requirement on the store, not a property of the broker, and it should be written down as
 one.
+
+Note the reference implementation does **not** meet the second condition: it forwards the
+caller's assertion to the secret store as a bearer token, so anything that can read it can
+replay it for that token's remaining life. **[V]** Sender-constrained delegation would close
+that, and is not implemented here.
 
 ---
 
@@ -532,12 +699,16 @@ difference will matter to whoever relies on it.
 
 > **A watchlist proves presence, never absence.** Instrumentation that watches five named
 > headers can tell you those five were absent. It can say nothing whatever about the sixth
-> — which is precisely the claim being made. Only a full census answers it. **[M]**
+> — which is precisely the claim being made. Only a full census answers it. **[M]** that a
+> five-header watchlist reported a clean boundary while a census then found an unwatched
+> header on every request; **[A]** for the general rule that follows from it.
 
 > **Boundary observations are recorded before forwarding.** They look completely healthy
 > even when the downstream has been replaced by a stub, or is entirely broken. A conformance
 > run is valid only alongside a **response-side signal** proving the real chain executed.
-> Header evidence can prove a leak. It cannot prove a chain works. **[M]**
+> Header evidence can prove a leak. It cannot prove a chain works. **[V]** the observer
+> records the request before it forwards; **[M]** a re-applied manifest silently repointed
+> the monitor at a stub and the boundary observations went on looking correct.
 
 ## 14. What measurement found that review did not
 
@@ -550,7 +721,17 @@ The counts come from an observer on the boundary hop of a deployed rig, against 
 appliance, with a response-side signal confirming the chain executed — §13 rule 2 requires
 that, and it applies to this paper's own evidence as much as to anyone else's.
 
-**The gateway's own session cookie crossed on 1001 of 1001 requests.**
+**On the provenance of the two kinds of number below.** The *pre-fix* counts are historical:
+they were observed on a deployment that no longer exists, and no transcript was kept, so a
+reader cannot re-derive them. They are marked **[U]** — reported, not reproducible — and
+they are the weaker half of this section. The *post-fix* behaviour is different: it is a
+property of the current deployment and regenerates on demand, so it is marked **[M]** and
+the figures quoted are from a run anyone with the rig can repeat. Publishing a frozen
+transcript would only evidence the day it was captured; §13's argument is that the useful
+artefact is a test that can be re-run.
+
+**The gateway's own session cookie crossed on every request observed — 1001 of 1001 at the
+time. [U]**
 
 The broker fronted its targets on its own origin, so the browser attached the gateway's
 session cookie to every request, and the proxy forwarded it verbatim. Nothing downstream
@@ -562,9 +743,25 @@ design existed to protect.**
 
 The fix is to strip it by matching **name and value together**. Matching the name alone
 breaks a second gateway deployed behind the first, which legitimately uses the same cookie
-name. After the fix: **0 of 365** crossings, with the target's own five cookies preserved.
+name. The fix itself is not in this repository — it was contributed upstream to the
+gateway, and this paper's reference implementation is downstream of it. **[U]** for the
+change; what is verifiable here is its effect.
 
-**An unsigned identity header crossed on 115 of 115 requests.**
+That effect regenerates on the current deployment. Across **469 consecutive requests** on
+the boundary hop, with the monitor proxying to the real broker rather than a stub:
+**0 carried the gateway's session cookie.** The target's own cookies were passed through
+untouched — 308 requests carried all five (`accepts-cookies`, `null`, `publicKeyId`,
+`publicKeyIdSignatureBase64`, `ui_lang`) and 161 carried the two the browser had at that
+point in the session. **[M]**
+
+That second figure matters more than it looks. "The target's five cookies were preserved"
+would have been a tidier sentence and a false one: cookie sets vary by session phase, and a
+claim that every request carried five would fail the first time somebody checked. What is
+being asserted is that the broker passes the target's cookies through *as presented* and
+strips the gateway's — not that a fixed set appears every time.
+
+**An unsigned identity header crossed on every request observed — 115 of 115 at the
+time. [U]**
 
 The broker injected an identity header carrying the same identity as the token, but
 unsigned, with no configuration available to disable it.
@@ -575,6 +772,20 @@ attribution used the weak one — and the audit log is the artefact everyone rel
 an incident. Attribute from the verified token, and suppress the headers wherever a signed
 token is present.
 
+### Checking this yourself
+
+The **[M]** figure above is the only one a reader can re-derive, and that is deliberate. On
+a deployment of `reference/deploy`, with the monitor pointed at the broker rather than the
+stub, the observer emits one JSON record per request carrying `all_header_names` and, within
+`observed`, the `cookie_names` that crossed. Aggregating those records over a run reproduces
+the shape of the claim: how many requests carried the gateway's session cookie, and which of
+the target's own cookies were passed through.
+
+Two cautions carried over from §13, which apply to this paper's evidence as much as anyone
+else's. Confirm the monitor's `UPSTREAM_URL` names the broker, not the stub, or the run
+observes a chain that is not the one under test. And read `all_header_names` rather than the
+watchlist, because the watchlist can only speak to the headers it was told to watch.
+
 ## 15. What is left over
 
 No design is free of residue. These are the parts that remain after the pattern has done
@@ -583,14 +794,43 @@ its work.
 | Risk | Status |
 |---|---|
 | Identity visible at the boundary | **[M]** the subject appears in the token. Needs pairwise or pseudonymous subject identifiers at the IdP — outside the broker's control. Note the subject may be a personal email even for administrative accounts |
-| Capability outliving its session | **[M]** widens the replay window; bound by `min(ttl, assertion_remaining)` |
-| Revocation lag | **[M]** a warm target session outlives revoked authorisation for the remainder of its TTL |
-| Shared target session | **[M]** dilutes per-user attribution at the target |
-| Bodies not observed | **[M]** measurement covers headers and sizes. "Nothing else crossed" is proven for headers and **unproven for payloads** |
+| Capability outliving its session | the bound is implemented and observable — **[V]** `mintUntil`, **[M]** both branches (`capability_ttl` and `assertion_expiry`) appear in the deployment's own logs. That an unbounded capability **[A]** widens the replay window is the reasoning the bound exists to answer, not something measured |
+| Revocation lag | **[V]** logout deliberately leaves the shared target session standing. That a warm session therefore **[A]** outlives revoked authorisation for the remainder of its TTL follows from that, but was not demonstrated: nobody revoked mid-session and watched service continue |
+| Shared target session | **[V]** one upstream session is shared across operators. That this **[A]** dilutes per-user attribution *at the target* is inference — confirming it means reading the appliance's own logs, which was not done |
+| Bodies not observed | **[M]** the measurement covers header names, cookie names and body sizes — that is what the instrument records. Payload *contents* are **[U]**: "nothing else crossed" is established for headers and **unproven for payloads** |
 | Extendable session credentials | **[D]** some platforms let the holder extend a session — on one, from 1,200 s up to a 36,000 s ceiling. Treat the ceiling, not the default, as the exposure |
 | Destination binding is not least privilege | **[A]** a grant binds credential and destination, not *operation*. If the underlying credential is administrative, so is the capability. **Treat each capability as equivalent to the full privilege of the underlying credential** unless an adapter demonstrably narrows it. Prefer separate least-privilege target credentials where the target supports them |
-| Workload-identity fallback exists | **[M]** the reference implementation retains a machine-identity path for callers that cannot present an assertion. It is off by default and mutually exclusive with per-user mode — enabling both refuses to start — but it exists, and an operator who enables it loses the attributability the pattern is for |
+| Workload-identity fallback exists | **[V]** the reference implementation retains a machine-identity path for callers that cannot present an assertion. It is off by default and mutually exclusive with per-user mode — enabling both refuses to start, which is a startup guard and a regression test, not a rig observation — but it exists, and an operator who enables it loses the attributability the pattern is for |
 | Renewal implemented, firing unobserved | **[M]** capture is verified — a session records a refresh grant and a true expiry. Renewal firing has not been observed, because it is request-driven and both attempts ran against idle sessions |
+| A second path in the same deployment breaks the zone rule | **[M]** the rig's identity zone holds an egress rule permitting SSH directly to the appliance, and the gateway resolves that credential *itself* from its own vault backend — so on that path the appliance credential reaches the identity side by a route that never crosses the monitor. It is the pattern's own inverse, running beside it. See below |
+
+### The contradiction in the same deployment
+
+That last row deserves more than a table cell, because it undercuts §10's rule as stated.
+
+§10 says the identity zone holds *assertions only — never a credential*. In the deployment
+this paper measures, that is true of the **broker path** and false of the deployment as a
+whole. The gateway also offers SSH to the same appliance, and for that it resolves the
+credential through its own vault integration: the secret is fetched **to** the identity
+side, by a route the monitor never sees. The network policy permitting it is in
+`reference/deploy/manifests`, and its own comment calls this the documented contradiction.
+
+Three honest observations follow.
+
+**The rule is a property of a path, not of a namespace.** Putting a workload in a zone does
+not make the zone's rule true; the rule holds only where every credential-bearing path has
+been moved. One unmoved path is enough to falsify it, and SSH was left in place precisely so
+the behaviour could be observed rather than argued about.
+
+**It is out of scope in the sense that matters least.** §8 excludes SSH as Class C, and no
+design here serves it. But a reader inspecting the rig will find an appliance credential on
+the identity side, and "Class C is out of scope" does not answer that — it explains why the
+path exists, not why the zone rule still reads as unconditional.
+
+**It sharpens what the pattern is worth.** The HTTP path demonstrably keeps the credential
+on the far side. The SSH path beside it demonstrably does not. That contrast is the clearest
+statement of the pattern's value and its limit: it is not a property of the estate, only of
+the traffic that has been brought inside it.
 
 ## 16. Operations
 
@@ -629,10 +869,16 @@ happens when that rule is broken quietly.
 - Whether renewal fires as implemented. Capture is verified; firing is not.
 - Whether request bodies can be brought inside the measured property without content
   inspection, and what that would cost.
+- How to clear material a text scan cannot read. A screen recording of the working system
+  **is** published, on the landing page. It carries what no rule in the sanitiser can see:
+  identity and product names rendered as pixels. The gate therefore refuses video by
+  default and admits this one by the SHA-256 of its reviewed bytes, so re-encoding forces
+  re-review — but the clearing step itself is a human watching frames, and that does not
+  scale. What would is unresolved.
 
 ---
 
 *A working reference implementation — assertion verification, per-user vault exchange,
-login interception and synthetic tokens — is in [`reference/`](../reference/) of this
-repository. An assessment of whether commodity API gateways can fill the broker role is in
+login interception and synthetic tokens — is under `reference/` in this repository. An
+assessment of whether commodity API gateways can fill the broker role is in
 [gateway evaluation](gateway-evaluation.html).*

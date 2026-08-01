@@ -1,6 +1,6 @@
 # Reference implementation
 
-A working broker for the pattern in [`docs/`](../docs/credential-broker-pattern.html), and
+A working broker for the pattern in [`docs/`](../docs/credential-broker-pattern.md), and
 the zone simulation used to measure it.
 
 This is a reference, not a product. It exists so the pattern's claims can be checked against
@@ -189,6 +189,23 @@ run means anything:
   parameterises four; the login request shape is hardcoded. The claim holds for targets
   matching that shape and overstates for the rest
 - renewal of the caller's assertion is implemented; its capture is verified, its firing is not
+- **§11's destination guard is only partly implemented.** Redirects are refused on every
+  credential-carrying client (`refuseRedirects`, with a regression test that asserts the
+  redirect target received nothing). Dial-time canonicalisation of the resolved address, and
+  blocking loopback / link-local / control-plane ranges, are **not** implemented — the
+  upstream URL is accepted as configured. Deployments relying on §11 in full must supply
+  that at the network layer
+- **`OIDC_AUDIENCE` is not required at startup.** Per-user mode demands a key set and an
+  issuer but will start without an audience, and audience checking is skipped when it is
+  unset. The prose elsewhere describes verification as signature, issuer, audience and
+  expiry; that is true of a correctly configured deployment, not of every deployment this
+  binary permits
+- **the fail-closed and revocation rules in §11 are partial.** Signing-key refresh fails
+  closed and there is no credential cache, but capability state is in process memory only,
+  there is no audit-availability gate, and revocation is not atomic with draining in-flight
+  work. Treat that table as requirements, not as a description of this code
 - SNMP, SSH and other non-HTTP targets are out of scope entirely — see Class C in the
-  paper's §8
+  paper's §8. Note the deployment in `deploy/` also runs an SSH path to the same appliance
+  that resolves its credential on the identity side; it is outside this pattern and is
+  documented in the paper's §15 as a contradiction rather than a feature
 - identifiers throughout are documentation placeholders — nothing here is a live endpoint

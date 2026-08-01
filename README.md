@@ -74,9 +74,20 @@ and neither *provides* it.
 | `docs/credential-broker-pattern.md` | the pattern, its failure modes, and where it does not help |
 | `docs/gateway-evaluation.md` | Kong and Apigee assessed against the real requirement set |
 | `docs/` | the published site (GitHub Pages serves from here) |
-| `docs/diagrams/` | C4 views, trust zones and a sequence — PlantUML source plus rendered SVG |
+| `docs/diagrams/` | trust-zone and deployment views — reproducible source plus rendered artifacts |
 | `reference/broker/` | the broker: assertion verification, vault exchange, SPA login interception, synthetic tokens |
 | `reference/deploy/` | manifests and scripts for the zone simulation, incl. the boundary experiment |
+
+Regenerate the static diagrams with:
+
+```bash
+plantuml -tsvg docs/diagrams/c0-trustzones.puml
+# Graphviz reads the icons as PNG, so regenerate them before the deployment view.
+for f in docs/diagrams/icons/*.svg; do
+  magick -background none -density 300 "$f" -resize 256x256 "${f%.svg}.png"
+done
+uv run docs/diagrams/d1-deployment-diagrams.py
+```
 
 ## Verification posture
 
@@ -86,12 +97,28 @@ documented, or explicitly open. Where a control was not proven, it says so.
 Two habits are worth stealing regardless of whether you use this pattern:
 
 - **A watchlist proves presence, never absence.** A five-header watchlist reported
-  a clean boundary; a full census then found an unsigned identity header on
-  115/115 requests that the watchlist had never been told to look for.
+  a clean boundary; a full census then found an unsigned identity header on every
+  request, which the watchlist had never been told to look for.
+- **A prescribed control is not an implemented one.** The paper's §11 requires
+  refusing redirects. The reference implementation did not, and the request that
+  carries the appliance password is exactly the one a redirect replays — so the
+  password reached the redirect target. Nobody argued against the control; it was
+  written down and never wired in. It is fixed, with a regression test that
+  asserts the redirect target received nothing.
 - **Verify a negative against a known positive.** A scan reporting "clean" is
   meaningless unless the same scan has been shown to catch a planted canary. The
   sanitiser in this repo (`sanitize.py`) refuses to report a pass unless its own
   canaries are detected first.
+- **A checker must refuse what it cannot read, not skip it.** `sanitize.py` scans
+  text. It cannot read a screen recording, where an operator name or a product
+  identifier lives in pixels — so it now *fails* on video rather than skipping
+  it, and its self-test plants a real `.mp4` to prove that path fires. Skipping
+  would have reported PASS on a file it never opened.
+- **An index goes stale silently.** Every claim carries an evidence marker, and
+  the table defining them is the index to that scheme. `check-markers.py` asserts
+  both directions — every marker used is declared, every marker declared is used,
+  and the paper's table matches the evaluation's — so adding evidence of a new
+  kind fails the check until the table is updated to match.
 
 ## Status and honesty
 

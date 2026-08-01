@@ -20,15 +20,18 @@ the difficulty actually sits.
 
 ## Evidence markers
 
-| Marker | Meaning |
-|---|---|
-| **[V]** | Verified from source — `Kong/kong` @ tag `3.9.3`, commit `a643428`, or the prototype's own source |
-| **[G]** | Verified from the GitHub API |
-| **[D]** | Vendor documentation (Apigee is closed-source; documentation is the ceiling) |
-| **[M]** | Measured in the deployed rig against the real appliance |
-| **[A]** | Reasoned but unverified — an architectural consequence, not an observation |
-| **[C]** | Community or practitioner example — weaker than vendor documentation |
-| **[U]** | Open question, stated as such |
+The same scale the paper defines, with the sources pinned for this assessment. Ordered
+strongest first.
+
+| Marker | Meaning | Strength |
+|---|---|---|
+| **[M]** | Measured in the deployed rig against the real appliance | observed |
+| **[V]** | Verified from source — `Kong/kong` @ tag `3.9.3`, commit `a643428`, or the prototype's own source | read the code |
+| **[G]** | Verified from the GitHub API | checked externally |
+| **[D]** | Vendor documentation (Apigee is closed-source; documentation is the ceiling) | vendor's claim |
+| **[C]** | Community or practitioner example | weaker than vendor documentation |
+| **[A]** | Reasoned but unverified — an architectural consequence, not an observation | argument only |
+| **[U]** | Open question, stated as such | not known |
 
 Kong's findings are source-verified. Apigee's cannot be, and are one confidence
 level lower throughout. That asymmetry matters: Kong's decisive finding was three
@@ -116,7 +119,7 @@ proxy can serve.
 | R8 | Bidirectional substitution on **every** subsequent request | **[V]** |
 | R9 | Maintain a long-lived upstream appliance session | **[V]** |
 | R10 | Telemetry distinguishing expiry from forgery | **[V]** |
-| R11 | No standing credential held in the identity or monitor zones | architecture |
+| R11 | No standing **appliance** credential held in the identity or monitor zones | architecture |
 | R12 | No vendor egress out of the credential zone | environment |
 
 R5–R9 are the ones that decide this evaluation. The pattern states the mechanism (§9); what
@@ -215,11 +218,20 @@ a vault-reference mechanism; it exposes `ServiceCallout`, an arbitrary HTTP call
 mid-flow with access to the incoming request — including the caller's token: **[D]/[C]**
 
 ```xml
-<Header name="Authorization">request.header.Authorization</Header>
+<Header name="Authorization">{request.header.Authorization}</Header>
 ```
 
 On this configuration the vault would see the operator, not the gateway — the requirement Kong cannot
 meet, and on this evidence met without custom code.
+
+Two caveats on that snippet, because it is the single piece of evidence carrying Apigee's
+one advantage over Kong. The braces are load-bearing: `<Header>` content is a *message
+template*, so a bare `request.header.Authorization` is sent as that literal string rather
+than the token's value. This document originally printed it without them. And the snippet is
+**illustrative and untested** — no proof of concept was built, consistent with this being a
+documentation-level evaluation. It shows the mechanism exists, not that a working
+configuration was demonstrated; that is the difference between **[D]/[C]** here and the
+**[V]** carried by every Kong finding, and it is why the verdict does not turn on it.
 
 **R2** is `VerifyJWT`/`OAuthV2`. **R4** is arithmetic over flow variables. **[D]**
 
@@ -353,8 +365,30 @@ dependency.
 | R8 bidirectional swap | Lua | custom | yes |
 | R9 upstream session | Lua | custom | yes |
 | R10 expiry vs forgery telemetry | custom | custom | **[V]** yes |
-| R11 no standing credential in identity or monitor zones | yes | yes | **[M]** yes |
+| R11 no standing **appliance** credential in identity or monitor zones | yes | yes | **[V]** yes, on the broker path ([M] for header/cookie transit) |
 | **R12 no vendor egress** | **yes** | **no** | yes |
+
+Two words in R11 are doing real work, and they were not there originally. The row
+once read "no standing credential" and was marked **[M]**. Both were wrong, in
+instructive ways.
+
+**Wrong marker.** Possession is not transit. The boundary method (§13 of the
+paper) observes what *crosses* a hop; it cannot establish what a zone *holds*.
+What actually establishes R11 is source: the appliance credential is fetched only
+through the credential-zone vault path, used only on the broker→appliance hop,
+and never written to a response. That is **[V]**. The transit half — nothing
+credential-bearing observed in headers or cookies — is genuinely **[M]**, and is
+what §14 reports.
+
+**Wrong scope.** Unqualified, "no standing credential" also claims the identity
+zone holds no bearer material at all, which is false by construction: the gateway
+holds its own sessions, and §14's whole lesson is that one of them was the more
+valuable prize. The requirement is about the *appliance* credential on the broker
+path, so it now says so.
+
+A separate path in the same deployment does hold an appliance credential on the
+identity side — see §15 of the paper. It is out of this evaluation's scope, not
+out of existence.
 
 ---
 
