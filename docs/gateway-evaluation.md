@@ -110,7 +110,7 @@ proxy can serve.
 | R2 | Verify the caller's assertion on **every use** — signature, issuer, audience, expiry; fail closed | **[V]** `verify.go` |
 | R3 | Authenticate to the vault **as the operator**, never as the pod or gateway | requirement |
 | R4 | Bound the capability by `min(capability_ttl, assertion_remaining)` | **[V]** `mintUntil` |
-| R5 | **Synthesize a response** to the SPA's login POST | **[V]** |
+| R5 | **Synthesize a response** to the SPA's login request | **[V]** |
 | R6 | **Rewrite the response body**, substituting a synthetic token | **[V]** |
 | R7 | Hold **server-side synthetic↔real token state** | **[V]** |
 | R8 | Bidirectional substitution on **every** subsequent request | **[V]** |
@@ -191,8 +191,8 @@ a way that would not surface in testing.
 
 ### Verdict
 
-**Can host the broker; provides none of it.** Kong contributes its proxy runtime and
-plugin lifecycle. R2–R9 are all custom code. R3 is impossible through Kong's own
+**Can host the broker; supplies almost none of it.** Kong contributes its proxy runtime and
+plugin lifecycle, and R2 via an Enterprise plugin. R3–R9 are custom code. R3 is impossible through Kong's own
 mechanisms and must be written around them.
 
 One hypothesis worth killing explicitly, because it is plausible and wrong: running Kong

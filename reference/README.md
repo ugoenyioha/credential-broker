@@ -68,9 +68,9 @@ The full surface is in `loadConfig`. The ones that change behaviour rather than 
 | `USER_TOKEN_HEADER` | where the forwarded assertion arrives |
 | `OIDC_JWKS_URL`, `OIDC_ISSUER`, `OIDC_AUDIENCE` | verification inputs; audience checking is skipped if unset, which you almost certainly do not want |
 | `OPENBAO_JWT_MOUNT`, `OPENBAO_JWT_ROLE` | the per-user exchange |
-| `ALLOW_MACHINE_CREDENTIAL` | enables the workload-identity fallback. Off by design |
+| `ALLOW_MACHINE_CREDENTIAL` | enables the workload-identity fallback. Defaults to false, and is **mutually exclusive** with `REQUIRE_USER_TOKEN` — setting both refuses to start, because pre-warming the shared session with machine identity stops per-user authorisation gating the fetch |
 | `ALLOW_NO_GATEWAY_AUTH` | removes the requirement for a shared secret from the gateway. Off by design |
-| `LOGIN_PATH`, `TOKEN_FIELD`, `TIMEOUT_FIELD` | the per-target parameters — the five values the paper's §8 says are all a new target needs |
+| `LOGIN_PATH`, `TOKEN_FIELD`, `TIMEOUT_FIELD`, `REFRESH_PATH` | four of the five per-target parameters in the paper's §8. The fifth — **request shape** — is not configurable here: the login body is hardcoded as `{"user":…,"password":…}` JSON and the method as `PATCH`. A target using a different shape needs code, not configuration |
 | `SYNTHETIC_TOKEN_TTL` | lifetime of the handle given to the browser |
 
 Two guards are worth knowing because they are the ones that will stop you at startup:
@@ -130,6 +130,10 @@ run means anything:
 ## Known limits of this implementation
 
 - one upstream appliance session is shared across operators
-- the machine-identity fallback exists and must be explicitly disabled, not merely unused
+- a workload-identity fallback exists (`ALLOW_MACHINE_CREDENTIAL`). It is off by default and
+  cannot be combined with per-user mode — the two are mutually exclusive at startup
+- §8 of the paper claims a new target costs five parameters. This implementation
+  parameterises four; the login request shape is hardcoded. The claim holds for targets
+  matching that shape and overstates for the rest
 - renewal of the caller's assertion is implemented; its capture is verified, its firing is not
 - identifiers throughout are documentation placeholders — nothing here is a live endpoint

@@ -60,6 +60,12 @@ So the broker *answers* the login instead, replacing the token in the appliance'
 response with an opaque synthetic one and swapping it back on every subsequent request.
 Machine callers need none of this; browser callers cannot work without it.
 
+## How to read the claims
+
+Claims carry markers — **[M]** measured, **[D]** vendor documentation, **[C]** community or
+practitioner example, **[A]** reasoned but unverified, and in the evaluation **[V]** verified
+from source. Where a control was not proven, it says so.
+
 ## On API gateways
 
 Both Kong and Apigee were assessed against the requirements the implementation produced,
@@ -76,10 +82,6 @@ would have to egress to, and whether it can run with that plane unreachable is a
 question. The evaluation is explicit about which claims rest on which kind of source.
 
 ## What was measured
-
-Claims carry markers — **[M]** measured, **[D]** vendor documentation, **[A]** reasoned but
-unverified, and in the evaluation **[V]** verified from source. Where a control was not
-proven, it says so.
 
 - A gateway session cookie crossed the boundary on **1001 of 1001** requests before the
   fix, **0 of 365** after — carrying, on that hop, something more valuable than the secret

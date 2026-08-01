@@ -57,7 +57,7 @@ request. For browser-facing targets that cannot work, and the reason is structur
 > to type the very credential you are concealing.
 
 So the broker *answers* the login instead: it holds one authenticated upstream
-session, replies to the SPA's login POST with the appliance's own response body
+session, replies to the SPA's login request with the appliance's own response body
 but with the token replaced by an opaque synthetic token, and swaps that token
 back on every subsequent request. Neither the password nor the real session token
 ever reaches the browser.

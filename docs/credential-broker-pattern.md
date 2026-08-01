@@ -162,6 +162,11 @@ If every team builds its own, you get many implementations of uneven quality, no
 audit, and no way to tell which ones actually hold the property they claim. If one is built
 and shared, teams onboard by configuration rather than construction.
 
+Before choosing, settle the question most people ask first: can an API gateway you already
+own do this? The assessment is in [gateway evaluation](gateway-evaluation.html); the short
+answer is that both products examined can host such a broker and neither supplies the parts
+that make it hard.
+
 There is a third option that costs far less than either and is useful even if nothing is
 ever funded: **publish the test.** The safety property here is measurable (§13). A
 conformance test can be applied to any independent implementation, including ones you did
@@ -171,6 +176,7 @@ On cost, the useful thing to know is what it scales with. **Effort scales with d
 target types, not target count.** Onboarding the fifth device of a type you already support
 is configuration. The first device of a new type is integration. Most estates have five to
 fifteen distinct types, which is a very different number from how many devices they have.
+**[A]**
 
 ---
 
@@ -235,7 +241,12 @@ Four vendors, one shape. Per-target knowledge reduces to five parameters:
 login path · request shape · where the session credential goes · TTL · refresh
 ```
 
-That is why this generalises. It is a handful of parameters, not an integration project.
+That is why this generalises: a handful of parameters rather than an integration project.
+
+One honest qualification. The reference implementation parameterises four of the five — it
+hardcodes the login **request shape**, so a target whose login body differs needs code
+rather than configuration. The claim holds for targets sharing a shape and overstates for
+the rest. **[M]**
 
 ### A2 — the one that will catch you [D]
 
@@ -265,8 +276,9 @@ completes, the server stops challenging and treats that connection as authentica
 is no artefact to inject into subsequent requests, which means a transparent proxy cannot
 work here at all — there is nothing for it to inject.
 
-It also breaks session sharing. RFC 4559 §6 is explicit that an intermediary *must not
-share authenticated connections between different clients to the same server*. So B-conn
+It also breaks session sharing. RFC 4559 §6 (Security Considerations; the RFC is Informational) says an intermediary *"must
+take care to not share authenticated connections between different authenticated clients to
+the same server"*. So B-conn
 targets need a **dedicated connection per caller**; sharing is not merely inefficient, it
 is incorrect. Concurrency at the target then scales with the number of callers, which is a
 capacity conversation you want to have early.
@@ -476,7 +488,7 @@ first — and the second is the one you built the audit trail for.
 ## 12. What a compromised broker means
 
 It is worth being blunt. A compromised broker holds every credential it has fetched, and
-can alter its own gates, scrubbing and audit.
+can alter its own gates, scrubbing and audit. **[A]**
 
 "It authorises as the caller" limits it **only if** the secret store enforces exact-path
 grants independently, and the delegation is not a replayable bearer token. That is a
@@ -534,6 +546,10 @@ pattern. Both are invisible to architecture review, and both were found by measu
 boundary rather than by reviewing the design. The crossing counts below are measured
 **[M]**; the fixes that follow each are recommendations.
 
+The counts come from an observer on the boundary hop of a deployed rig, against a real
+appliance, with a response-side signal confirming the chain executed — §13 rule 2 requires
+that, and it applies to this paper's own evidence as much as to anyone else's.
+
 **The gateway's own session cookie crossed on 1001 of 1001 requests.**
 
 The broker fronted its targets on its own origin, so the browser attached the gateway's
@@ -573,6 +589,7 @@ its work.
 | Bodies not observed | **[M]** measurement covers headers and sizes. "Nothing else crossed" is proven for headers and **unproven for payloads** |
 | Extendable session credentials | **[D]** some platforms let the holder extend a session — on one, from 1,200 s up to a 36,000 s ceiling. Treat the ceiling, not the default, as the exposure |
 | Destination binding is not least privilege | **[A]** a grant binds credential and destination, not *operation*. If the underlying credential is administrative, so is the capability. **Treat each capability as equivalent to the full privilege of the underlying credential** unless an adapter demonstrably narrows it. Prefer separate least-privilege target credentials where the target supports them |
+| Workload-identity fallback exists | **[M]** the reference implementation retains a machine-identity path for callers that cannot present an assertion. It is off by default and mutually exclusive with per-user mode — enabling both refuses to start — but it exists, and an operator who enables it loses the attributability the pattern is for |
 | Renewal implemented, firing unobserved | **[M]** capture is verified — a session records a refresh grant and a true expiry. Renewal firing has not been observed, because it is request-driven and both attempts ran against idle sessions |
 
 ## 16. Operations
