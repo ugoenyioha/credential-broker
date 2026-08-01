@@ -166,12 +166,14 @@ The second gives the adapter an opaque handle instead of the credential, and has
 
 What survives is inverting the direction. A team does not contribute code that *performs* the login; it contributes a description of what the login looks like:
 
+{% raw %}
 ```
 {"user":"{{.User}}","password":"{{.Password}}"}
 {"username":"{{.User}}","password":"{{.Password}}","loginProviderName":"tmos"}
 {"id":1,"method":"exec","params":[{"url":"/sys/login/user",
   "data":{"user":"{{.User}}","passwd":"{{.Password}}"}}]}
 ```
+{% endraw %}
 
 Those are the reference appliance, F5 BIG-IP, and FortiManager. **[D]** The third is the awkward one — the credential nested inside a JSON-RPC envelope under a different pair of key names — and it is the case a hardcoded flat body cannot express at all. All three reach a working login by configuration alone, each covered by a test that renders it and asserts the credential lands in the right place. **[V]**
 
@@ -179,7 +181,7 @@ The security property comes from who does what. The contributor supplies the sha
 
 So consider the hostile version. A ceremony has no way to name a destination: there is no URL field in the template, and a template that writes `https://attacker.example` produces those characters as an inert string in a body already addressed elsewhere. Nothing dials it. Go's `text/template` performs no I/O, no process execution and no network calls of its own. **[V]**
 
-That alone makes a *copy* of the credential pointless — a second copy would travel to the same place as the first. But pointless is a weaker claim than impossible, and the difference matters to whoever reviews a contributed ceremony: pointless means they must reason about where the credential got to, impossible means they need not. So ceremonies are restricted to a grammar that admits only literal text and the two substitutions, with `{{.Password}}` permitted exactly once. Anything able to repeat a value — `{{if}}`, `{{range}}`, `{{with}}`, `{{template}}`, variable bindings, pipelines that could launder a copy through a function — is refused when the ceremony is parsed, not analysed for intent. Whitelisting the two constructs we need, rather than blacklisting the ones we fear, is what keeps that true against constructs added to the template language later. **[V]**
+That alone makes a *copy* of the credential pointless — a second copy would travel to the same place as the first. But pointless is a weaker claim than impossible, and the difference matters to whoever reviews a contributed ceremony: pointless means they must reason about where the credential got to, impossible means they need not. So ceremonies are restricted to a grammar that admits only literal text and the two substitutions, with {% raw %}`{{.Password}}` permitted exactly once. Anything able to repeat a value — `{{if}}`, `{{range}}`, `{{with}}`, `{{template}}`{% endraw %}, variable bindings, pipelines that could launder a copy through a function — is refused when the ceremony is parsed, not analysed for intent. Whitelisting the two constructs we need, rather than blacklisting the ones we fear, is what keeps that true against constructs added to the template language later. **[V]**
 
 The credential now appears in the login body once, at a position a reader can point to, and nowhere else.
 

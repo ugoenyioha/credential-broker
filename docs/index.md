@@ -51,12 +51,14 @@ A broker is only worth building if the second target is cheaper than the first. 
 
 The fourth and fifth are the interesting ones. The *shape* is contributed as a **ceremony**: a description of the login body, not code that performs the login.
 
+{% raw %}
 ```
 {"user":"{{.User}}","password":"{{.Password}}"}
 {"username":"{{.User}}","password":"{{.Password}}","loginProviderName":"tmos"}
 {"id":1,"method":"exec","params":[{"url":"/sys/login/user",
   "data":{"user":"{{.User}}","passwd":"{{.Password}}"}}]}
 ```
+{% endraw %}
 
 Those are the reference appliance, F5 BIG-IP, and FortiManager — the last nesting the credential inside a JSON-RPC envelope under different key names again. **[D]** All three reach a working login by configuration alone. **[V]**
 
