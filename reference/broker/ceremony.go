@@ -14,8 +14,8 @@ package main
 //
 //	{"user":"{{.User}}","password":"{{.Password}}"}
 //	{"username":"{{.User}}","password":"{{.Password}}","loginProviderName":"tmos"}
-//	{"id":1,"method":"exec","params":[{"url":"sys/login/user",
-//	  "data":[{"user":"{{.User}}","passwd":"{{.Password}}"}]}]}
+//	{"id":1,"method":"exec","params":[{"url":"/sys/login/user",
+//	  "data":{"user":"{{.User}}","passwd":"{{.Password}}"}}]}
 //
 // # WHY THIS IS A CEREMONY AND NOT AN ADAPTER
 //
