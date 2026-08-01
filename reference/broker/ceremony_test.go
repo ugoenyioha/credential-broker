@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -122,55 +123,84 @@ func TestCeremonyCannotBreakOutOfItsJSONString(t *testing.T) {
 	}
 }
 
-// TestCeremonyCannotRedirectTheCredential is the security property that
-// separates a ceremony from an adapter, stated as a test.
+// TestCeremonyCannotDuplicateTheCredential is the stronger of the two security
+// properties: the credential may appear in the login body exactly once, and a
+// ceremony that tries to place a second copy is rejected rather than rendered.
 //
-// A hostile ceremony can copy the credential into extra fields -- that is
-// conceded, and this test asserts it, because the point is that it does not
-// matter. The body still goes only where the SERVICE sends it, and a ceremony
-// has no way to express a destination. Note the deliberate absence of any
-// assertion that the extra field is stripped: the defence is not sanitising the
-// body, it is owning the address.
-func TestCeremonyCannotRedirectTheCredential(t *testing.T) {
-	hostile := `{"user":"{{.User}}","password":"{{.Password}}",` +
-		`"exfil":"{{.Password}}"}`
-
-	rendered, err := renderLoginBody(hostile, "operator", "s3cr3t")
-	if err != nil {
-		t.Fatalf("render: %v", err)
-	}
-	var parsed map[string]any
-	if err := json.Unmarshal([]byte(rendered), &parsed); err != nil {
-		t.Fatal(err)
-	}
-	// Conceded: it duplicated the credential within the body.
-	if parsed["exfil"] != "s3cr3t" {
-		t.Fatalf("precondition failed; expected the copy to be present: %v", parsed)
-	}
-
-	// The property that actually matters: a ceremony is a body, and a body has
-	// no address. The template language offers no field, function or syntax
-	// that names a destination, so the only URL in play is the one the service
-	// builds from upstreamURL and loginPath.
-	for _, forbidden := range []string{"http://", "https://", "{{.URL}}", "{{.Destination}}"} {
-		if strings.Contains(rendered, forbidden) {
-			t.Fatalf("ceremony output contained a destination-like token %q", forbidden)
+// Owning the destination already makes a copy pointless -- it would travel only
+// to the upstream we chose. Refusing the copy outright is what makes a ceremony
+// REVIEWABLE: a human reading one does not have to reason about where else the
+// credential reached.
+func TestCeremonyCannotDuplicateTheCredential(t *testing.T) {
+	// Every one of these is a different way to ask for a second copy.
+	for _, hostile := range []string{
+		// The direct approach: name it twice.
+		`{"user":"{{.User}}","password":"{{.Password}}","exfil":"{{.Password}}"}`,
+		// Hide the repetition in control flow.
+		`{"a":"{{.Password}}"{{if .User}},"b":"{{.Password}}"{{end}}}`,
+		`{{range .User}}{"p":"{{.Password}}"}{{end}}`,
+		`{{with .User}}{"p":"{{.Password}}"}{{end}}`,
+		// Launder a copy through a function or a pipeline.
+		`{"p":"{{.Password | printf "%[1]s%[1]s"}}"}`,
+		`{"p":"{{printf "%[1]s%[1]s" .Password}}"}`,
+		// Declare a variable and re-emit it.
+		`{{$p := .Password}}{"a":"{{$p}}","b":"{{$p}}"}`,
+		// A bare declaration, binding something harmless. No VariableNode is
+		// ever emitted here, so this case isolates the declaration clause --
+		// without it, a ceremony could establish bindings we do not model.
+		`{{$x := .User}}{"p":"{{.Password}}"}`,
+	} {
+		if _, err := renderLoginBody(hostile, "operator", "s3cr3t"); err == nil {
+			t.Errorf("ceremony placed a second copy of the credential: %s", hostile)
+		}
+		// And it must be refused at startup too, not merely at render.
+		if err := validateLoginCeremony(http.MethodPost, hostile); err == nil {
+			t.Errorf("startup guard admitted a duplicating ceremony: %s", hostile)
 		}
 	}
+}
 
-	// And a ceremony that TRIES to name one gets a literal, not a redirect:
-	// text/template has no I/O, no exec and no network, so an unknown field is
-	// an error and a string is just a string.
+// TestCeremonyCannotRedirectTheCredential is the property that separates a
+// ceremony from an adapter: a ceremony describes a BODY, and a body has no
+// address. Even a well-formed ceremony cannot influence where its output goes.
+func TestCeremonyCannotRedirectTheCredential(t *testing.T) {
+	// A ceremony that tries to name a destination gets a literal, not a
+	// redirect. text/template performs no I/O, no exec and no network calls, so
+	// a URL in a ceremony is just characters in a body bound for the upstream
+	// this service configured. Nothing dials it.
 	attempt := `{"user":"{{.User}}","password":"{{.Password}}","url":"https://attacker.example/collect"}`
 	out, err := renderLoginBody(attempt, "operator", "s3cr3t")
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	if !json.Valid([]byte(out)) {
-		t.Fatal("expected inert JSON")
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Fatalf("expected inert JSON: %v", err)
 	}
-	// It rendered as an inert string in a body bound for the configured
-	// upstream. Nothing dials it. That is the whole defence.
+	if parsed["url"] != "https://attacker.example/collect" {
+		t.Fatalf("precondition failed; expected the URL to survive as a string: %v", parsed)
+	}
+	// The point: it is data in the body, and the body's address is ours. There
+	// is no template field, function or syntax that names a destination -- the
+	// grammar admits only literal text and .User / .Password.
+	if err := renderIntoDestinationIsImpossible(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// renderIntoDestinationIsImpossible documents, as executable code, that the
+// ceremony surface exposes exactly two substitutions and no way to reach a URL.
+func renderIntoDestinationIsImpossible() error {
+	for _, naming := range []string{
+		`{"p":"{{.Password}}","u":"{{.URL}}"}`,
+		`{"p":"{{.Password}}","u":"{{.Destination}}"}`,
+		`{"p":"{{.Password}}","u":"{{.Upstream}}"}`,
+	} {
+		if _, err := renderLoginBody(naming, "operator", "s3cr3t"); err == nil {
+			return fmt.Errorf("ceremony was able to name a destination field: %s", naming)
+		}
+	}
+	return nil
 }
 
 // TestCeremonyRejectsUnknownSubstitutions keeps the ceremony surface to exactly

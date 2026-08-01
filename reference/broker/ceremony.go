@@ -40,8 +40,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"text/template"
+	"text/template/parse"
 )
 
 // ceremonyValues carries the two substitutions a login body may reference.
@@ -69,6 +69,69 @@ func jsonStringEscape(s string) string {
 	return string(b[1 : len(b)-1])
 }
 
+// checkCeremonyShape restricts a ceremony to the smallest grammar that can
+// still express a login body: literal text, and substitutions of exactly
+// {{.User}} or {{.Password}}.
+//
+// Owning the destination already makes duplicating the credential pointless --
+// a copy still goes only where we send it. This makes it IMPOSSIBLE, which is
+// the stronger and more reviewable property: a human reading a ceremony does
+// not have to reason about where else the credential might have got to.
+//
+// Everything with the power to repeat a value is rejected outright rather than
+// analysed: {{if}}, {{range}}, {{with}}, {{template}}, {{define}}, {{block}},
+// variable assignment, and pipelines (so `{{.Password | printf "%s%s"}}` cannot
+// launder a second copy through a function). Whitelisting the two node types we
+// need is safe against constructs added to text/template in future Go releases;
+// blacklisting known-bad ones would not be.
+func checkCeremonyShape(tree *parse.Tree) error {
+	seenPassword := 0
+	for _, n := range tree.Root.Nodes {
+		switch node := n.(type) {
+		case *parse.TextNode:
+			// Literal bytes of the body. Inert.
+		case *parse.ActionNode:
+			if len(node.Pipe.Decl) != 0 {
+				return fmt.Errorf("a ceremony may not declare variables")
+			}
+			if len(node.Pipe.Cmds) != 1 {
+				return fmt.Errorf("a ceremony may not use pipelines")
+			}
+			args := node.Pipe.Cmds[0].Args
+			if len(args) != 1 {
+				return fmt.Errorf("a ceremony may not call functions")
+			}
+			field, ok := args[0].(*parse.FieldNode)
+			if !ok || len(field.Ident) != 1 {
+				return fmt.Errorf("a ceremony may substitute only .User and .Password")
+			}
+			switch field.Ident[0] {
+			case "User":
+			case "Password":
+				seenPassword++
+			default:
+				return fmt.Errorf("unknown substitution .%s: a ceremony may substitute "+
+					"only .User and .Password", field.Ident[0])
+			}
+		default:
+			// {{if}}, {{range}}, {{with}}, {{template}}, {{block}}, comments...
+			return fmt.Errorf("a ceremony may contain only literal text and " +
+				"{{.User}} / {{.Password}} substitutions")
+		}
+	}
+	// Exactly once, in both directions. Zero would authenticate as nobody;
+	// more than one is the duplication this whole check exists to prevent.
+	if seenPassword == 0 {
+		return fmt.Errorf("a ceremony must reference {{.Password}} exactly once, found none: " +
+			"the login request would carry no credential")
+	}
+	if seenPassword > 1 {
+		return fmt.Errorf("a ceremony must reference {{.Password}} exactly once, found %d: "+
+			"the credential may appear in the login body once and nowhere else", seenPassword)
+	}
+	return nil
+}
+
 // renderLoginBody turns a ceremony into the exact bytes of a login request body.
 //
 // It does NOT decide where those bytes go. The caller owns the destination.
@@ -80,6 +143,11 @@ func renderLoginBody(ceremony, user, password string) (string, error) {
 	tmpl, err := template.New("login").Parse(ceremony)
 	if err != nil {
 		return "", fmt.Errorf("parse ceremony: %w", err)
+	}
+	// Enforced on EVERY render, not only at startup: a config path that reached
+	// rendering without passing the startup guard must not get a weaker rule.
+	if err := checkCeremonyShape(tmpl.Tree); err != nil {
+		return "", err
 	}
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, ceremonyValues{
@@ -123,16 +191,12 @@ func validateLoginCeremony(method, ceremony string) error {
 	default:
 		return fmt.Errorf("LOGIN_METHOD must be POST, PUT or PATCH, got %q", method)
 	}
-	rendered, err := renderLoginBody(ceremony, "probe-user", loginCeremonyProbe)
-	if err != nil {
+	// Rendering with the probe exercises the shape check, the escaping and the
+	// JSON validity check in one go. The rendered body is discarded: it is only
+	// evidence that a real login WOULD render, and it contains a credential
+	// (albeit a fake one), so it is not something to hold or log.
+	if _, err := renderLoginBody(ceremony, "probe-user", loginCeremonyProbe); err != nil {
 		return fmt.Errorf("LOGIN_BODY: %w", err)
-	}
-	// A ceremony that does not carry the credential would authenticate as
-	// nobody and fail confusingly at the appliance. Catch the empty-handed
-	// ceremony at boot.
-	if !strings.Contains(rendered, jsonStringEscape(loginCeremonyProbe)) {
-		return fmt.Errorf("LOGIN_BODY does not reference {{.Password}}, so the login request " +
-			"would carry no credential")
 	}
 	return nil
 }
