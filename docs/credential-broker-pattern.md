@@ -9,6 +9,8 @@ An engineer signs in with single sign-on and needs the administration page of a 
 
 The question is simple: **how can the engineer use the switch without its shared password entering that recording?**
 
+The claim has a deliberate boundary. The broker does not place the appliance password or real appliance session token on the inspected segment. The boundary audit verifies headers and cookies, not arbitrary request-body contents. Identity, timing, the signed identity assertion, and the broker's short-lived capability remain visible. This is a control over the intended broker path, not a promise that no caller can ever send sensitive data.
+
 Claims marked **[M]** were measured on the running system, **[V]** read from source, **[D]** taken from vendor documentation, **[A]** are design arguments we have not tested, and **[U]** are open. The [appendix](appendix.html) explains the complete scale and what remains unresolved.
 
 ## Why is a recorded password worse than a recorded short-lived token?
@@ -28,7 +30,7 @@ What makes this worse than ordinary "secrets in transit" is what a password does
 |  | A short-lived token | A password |
 |----|----|----|
 | Lifetime in a recording | usable until it expires, then historical | valid until someone rotates it |
-| Tied to a person | yes | no — shared |
+| Carries an individual subject | yes, but a bearer can be replayed until expiry | no — shared |
 | Revocable | expires by itself | only by changing it everywhere |
 
 A recorded short-lived token becomes a historical artefact when it expires. A recorded password is a door that stays open until somebody notices and changes it everywhere it is used. For a shared credential on a device with no inventory of who holds it, that is a project, not a task.
@@ -37,7 +39,7 @@ Everything below follows from that one asymmetry.
 
 ## The solution in one paragraph
 
-Put a credential broker on the switch side of the inspecting boundary. The gateway authenticates the engineer and sends the broker only a short-lived, signed statement of the engineer's identity. The broker asks the secret store whether that person may use this switch. If authorised, it obtains the shared password and uses it there, on the switch side. The password is never returned to the engineer and never crosses the inspecting boundary.
+Put a credential broker on the switch side of the inspecting boundary. The gateway authenticates the engineer and sends the broker only a short-lived, signed statement of the engineer's identity. The broker asks the secret store whether that person may use this switch. If authorised, it obtains the shared password and uses it there, on the switch side. The password is never returned to the engineer and never crosses the inspecting boundary on the broker path.
 
 Four different security artefacts appear in the design. Keeping them distinct makes the rest of the paper easier to follow:
 
@@ -71,17 +73,19 @@ Two rules carry the design:
 1.  **Only expiring, bound, scoped material crosses the boundary.** An assertion may cross. A credential may not.
 2.  **The secret store authorises the operator, not the broker's workload identity.**
 
-The second one is the one people skip, and it is what makes access attributable. A vault that authenticates the broker's workload knows a machine asked for a credential. A vault that authenticates the person knows *who* asked.
+The second rule is what makes access attributable. A secret store that authenticates only the broker's workload knows a machine asked for a credential. A store that evaluates the engineer's identity knows *who* asked.
 
-What the caller gets back is a **capability**, not a credential — it works for one person, against one destination, for a short time, and is useless anywhere else:
+The reference implementation delegates that identity with a bearer token: anything that steals the token can replay it until it expires. The design property is caller-aware authorization; sender-constrained delegation would be stronger than the mechanism used here. The compromise section returns to that limit. **[V]**
+
+What the caller gets back is a **capability**, not the appliance credential. It is accepted only when presented with a valid assertion naming the same subject, against one destination, for a short time:
 
 | Bound to | Meaning |
 |----|----|
-| **Subject** | the authenticated person, from the verified assertion — never from a header |
+| **Subject claim** | must match the subject in a currently valid signed assertion — never an unsigned header |
 | **Destination** | one target |
 | **Expiry** | short, and not extendable by the holder |
 
-One rule governs the expiry and is easy to get wrong: a capability must not outlive the assertion that authorised it. Mint for `min(capability_ttl, assertion_remaining)`. A ten-minute capability issued against an assertion with three minutes left is seven minutes of authorisation the caller no longer holds. Both branches show up in the deployment's own logs. **[M]**
+One rule governs the expiry and is easy to get wrong: a capability must not outlive the assertion that authorised it. Create it for `min(capability_ttl, assertion_remaining)`. Without that minimum rule, a ten-minute capability issued against an assertion with three minutes left would create seven minutes of authorization the caller no longer holds. Both lifetime bounds show up in the deployment's own logs. **[M]**
 
 The trap that swallows otherwise-good designs: if the credential stays put but the caller ends up holding something equivalent — a long-lived session key, a non-expiring API key — the problem moved, it did not go away.
 
@@ -104,7 +108,7 @@ sequenceDiagram
     end
 
     OP->>MON: request + assertion
-    Note right of MON: retained indefinitely.<br/>This request contains only the assertion.
+    Note right of MON: retained indefinitely.<br/>Security headers contain the assertion;<br/>arbitrary request bodies are outside the census.
     MON->>BR: forwarded
 
     rect rgb(237, 245, 238)
@@ -119,7 +123,7 @@ sequenceDiagram
     BR-->>MON: capability
     MON-->>OP: capability
 
-    Note over OP,BR: capability — bound to subject, destination, expiry
+    Note over OP,BR: capability — matched to asserted subject,<br/>destination, expiry; not sender-constrained
 
     loop each subsequent request
         OP->>MON: request + assertion + capability
@@ -132,7 +136,7 @@ sequenceDiagram
     end
 ```
 
-The broker re-verifies the assertion and its capability binding on every request (step 14), not once at login.
+On every later request, the broker re-verifies the assertion and checks that its subject matches the capability. This prevents a capability being paired with a different valid identity, but it does not stop an attacker who steals both bearer values from replaying them until expiry. Sender-constrained tokens would be needed for that stronger property.
 
 ## Which appliance authentication methods fit this pattern?
 
@@ -171,6 +175,14 @@ All five are configuration in the reference implementation. **[V]**
 
 The login-request format is the difficult parameter. Hardcoding it means an appliance that spells its login body differently requires a broker code change. Writing a target-specific plugin solves that scaling problem but creates a security problem: the plugin would execute beside the plaintext password and would need network access to do its job.
 
+A safe extension mechanism needs five properties:
+
+1.  Contributors never receive the plaintext password.
+2.  Contributors cannot choose the request destination.
+3.  The password appears in the request exactly once.
+4.  The broker escapes the username and password for the request format.
+5.  An invalid definition fails before the broker fetches a real password.
+
 The obvious fix is to let each team contribute an adapter: a small piece of code that knows how its appliance likes to be asked. Two versions are possible, but both leave a larger review surface than the restricted description used here.
 
 The first runs the adapter in a sandbox and lets it perform the login. That adapter necessarily receives the plaintext credential and an authorised path to the appliance, so the platform must treat contributed code as part of the credential-handling trusted base. Sandboxing can narrow its environment; it cannot make that code credential-blind while the code itself performs the login.
@@ -198,15 +210,15 @@ That alone makes a *copy* of the credential pointless — a second copy would tr
 
 The credential now appears in the login body once, at a position a reader can point to, and nowhere else.
 
-That distinction is sharper than "adapters are unsafe": the danger is not tenant contribution, it is running tenant *code* beside a plaintext credential. A description cannot exfiltrate, because a description does not execute. Contributors supply the shape of the request; they never touch the credential or the address.
+That distinction is sharper than "adapters are unsafe": the danger is not contribution itself, but unnecessary executable code in the credential-handling path. The accepted grammar cannot perform I/O, choose a destination, invoke arbitrary functions, or duplicate the password. Contributors supply the shape of the request; they never touch the credential or the address.
 
 Two smaller properties follow. A malformed ceremony is rejected at startup rather than at first login, so a shape error surfaces while nothing is at stake instead of while the broker holds the appliance password — the same reasoning as the destination guard. And the credential is escaped for its JSON string context before the template runs, so a password containing quotes or braces stays one string value instead of becoming structure. The ceremony author cannot forget to escape, because the ceremony author never sees the raw value. **[V]**
 
-Where this stops, and the two cases are not alike. A login that is form-encoded or XML rather than JSON is the same idea in a different serialisation: the template describes a body, the broker escapes for that syntax instead of JSON, and nothing about the argument changes. That is work, not a question.
+Where this stops, and the two cases are not alike. A login that is form-encoded or XML rather than JSON follows the same architectural idea, but each format needs its own parser, escaping rules, duplicate-field behavior, content type, and tests. The JSON implementation does not prove those details automatically.
 
 A challenge-response handshake is the real boundary. There the credential is not *placed* in a request, it is *computed with* — hashed against a server nonce, say — and a template that only substitutes text cannot express a computation. Something has to run. That is precisely the adapter this section rejected, so a broker meeting such a target either implements the scheme itself, as first-party code, or admits the target is out of scope. What it should not do is accept contributed code as the way out: the moment tenant code runs beside a plaintext credential, the property that makes ceremonies safe is gone. **[A]**
 
-**A2 is the class that will catch you.** PAN-OS documents its API key lifetime as defaulting to `0`: never expires. **[D]** A target that looks ideal — credential exchanges for a session, session goes in a header — can hand you a permanent credential instead, and now you have built a capability system on something that never expires. Treat A2 as Class B until you have read the lifetime off a real device.
+**A2 is the class that will catch you.** PAN-OS documents its API key lifetime as defaulting to `0`: never expires. **[D]** A target that looks ideal — credential exchanges for a session, session goes in a header — can hand you a permanent credential instead, and now you have built a capability system on something that never expires. Reconfigure the appliance to enforce an acceptable finite lifetime, or treat it as Class B.
 
 **B-conn breaks session sharing.** NTLM and Negotiate authenticate a *connection*, not a request; once the handshake completes the server stops challenging. There is no artefact to inject, so a transparent proxy has nothing to work with. RFC 4559 §6 also says an intermediary "must take care to not share authenticated connections between different authenticated clients to the same server" **[D]** — so these targets need a dedicated connection per caller, and concurrency at the target scales with the number of callers.
 
@@ -214,9 +226,11 @@ A challenge-response handshake is the real boundary. There the credential is not
 
 ## Why do browser-based administration pages need different handling?
 
-A command-line client can attach an authorization token to each request. A browser application may behave differently: its own JavaScript checks cookies or browser storage to decide whether login has happened. That check happens before the browser sends an authenticated request. A header added later by a proxy is invisible to it, so the page concludes it is logged out and asks the engineer to type the very password the broker is meant to conceal. **[M]**
+A command-line client can attach an authorization token to each request. Some browser applications behave differently: their own JavaScript checks cookies or browser storage to decide whether login has happened. That check happens before the browser sends an authenticated request. A header added later by a proxy is invisible to it, so the page concludes it is logged out and asks the engineer to type the very password the broker is meant to conceal. **[M]**
 
 So the broker cannot inject. It has to *answer* the login: hold an authenticated upstream session, reply to the login request with the target's own response body but with the session token replaced by an opaque synthetic one, then swap it back on every subsequent request.
+
+The reference implementation handles a session token stored in the response body. An appliance that establishes authentication through `Set-Cookie` needs an equivalent cookie translation: keep the real cookie at the broker, give the browser an opaque replacement, and map `Cookie` headers back on later requests. Passing an authentication cookie through unchanged would leak the real appliance session. That cookie path is not implemented here and is integration work, not another value in the current five-parameter ceremony.
 
 That substitution is implemented in the reference. The appliance only ever sees the real token, a browser that never authenticated gets no `Authorization` header at all, and neither the password nor the real session token reaches the browser. **[V]**
 
@@ -256,7 +270,7 @@ sequenceDiagram
     end
 ```
 
-Steps 7 through 11 are the substitution: the broker discards what the browser submitted, performs its own login, and replaces the appliance's token before replying. Machine callers need none of this. Browser callers cannot work without it. That is a line between two kinds of broker, not a wrinkle in one.
+Steps 7 through 11 are the substitution: the broker discards what this browser application submitted, performs its own login, and replaces the appliance's token before replying. Clients that can present authorization directly need none of this. Clients whose own login state depends on the appliance response do. Classify by client behavior, not simply “browser” versus “machine.”
 
 ## What operational burden does the broker create?
 
@@ -287,7 +301,7 @@ Moving the broker to the far side feels like the whole job. It is not. If the br
 
 The secret store must be reachable from the broker without traversing the boundary. “Vault” and “secret store” refer to the same role in this paper.
 
-## How does the reference deployment enforce those zones?
+## Where does each component belong?
 
 | Zone | Contains | Rule |
 |----|----|----|
@@ -298,6 +312,10 @@ The secret store must be reachable from the broker without traversing the bounda
 Named this way, a credential appearing in the identity zone is self-evidently a violation. Nobody has to remember which side is privileged.
 
 We considered "high side / low side", which is standard. The canonical usage is that high means *more sensitive* — which would put the appliance credential, the most sensitive thing here, in the zone called *low*.
+
+The placement rule is conceptual: the gateway stays with identity, the recorder stays in the monitor zone, and the broker, secret store, and appliance-side password use stay together in the credential zone.
+
+### How the reference deployment enforces that placement
 
 ![Reference deployment showing Kubernetes namespaces, workloads, and external peers](diagrams/d1-deployment-diagrams.png)
 
@@ -319,9 +337,9 @@ In our deployment the inspected hop is plain HTTP, because the broker has no ser
 
 The zone rule holds for the *broker path* only, not for everything in the namespace. The same rig runs an SSH path to the same appliance on which the credential is resolved into the identity zone, never crossing the monitor. **[M]** A zone rule is a claim about paths that have been moved, and it stays false for every path that has not been. That contradiction is in the [appendix](appendix.html).
 
-## What has to be true for this to be safe
+## What has to be true for this to be safe?
 
-### Verify the assertion on every request
+### Could someone forge another engineer's identity?
 
 Signature, issuer, audience, expiry, not-before — on every request, not only when the session is established. Pin the algorithm. Fetch signing keys from the issuer's published key set, cache with a bounded lifetime, refresh on an unknown key id.
 
@@ -329,7 +347,7 @@ The failure mode is specific: an assertion that is well-formed, unexpired, from 
 
 Our first implementation had exactly that. It checked the forwarded token for shape, expiry and the presence of a subject, on the reasoning that the secret store had verified the signature at login. True of the login path. Not true of the steady-state path, which every proxied request takes.
 
-The consequence is reachable. A capability is bound to a subject so a captured capability cannot be used by anyone else. But if the steady-state path compares that bound subject against a subject read from an *unsigned* assertion, the binding is decorative — an observer of the boundary sees both the capability and the subject, since `sub` travels in clear, and can forge `header.{"sub":<victim>,"exp":<future>}.anything`. **[A]**
+The consequence is reachable. A capability records a subject, so it cannot be paired with a different valid identity. But if the steady-state path compares that subject against an *unsigned* assertion, the check is decorative — an observer of the boundary sees both the capability and the subject, since `sub` travels in clear, and can forge `header.{"sub":<victim>,"exp":<future>}.anything`. **[A]**
 
 > Binding to a subject means nothing unless the claim of that subject is authenticated.
 
@@ -337,7 +355,7 @@ With verification on every use, a forgery carrying the correct shape, a victim s
 
 Audience is the part that is easy to leave optional, and we did at first. Unset, the check is not weakened — it is *skipped*, so a token the issuer minted for a different relying party verifies here with the correct signature and issuer. In per-user mode the broker refuses to start without it. **[V]**
 
-### Guard the destination
+### Could the password be sent to the wrong server?
 
 The login request carries the fetched credential in its **body**. A default Go HTTP client follows up to ten redirects and, for 307 and 308, replays the method and body on each hop. So a redirect from the login endpoint hands the appliance password to whatever host the redirect names.
 
@@ -353,40 +371,40 @@ The proxy also fixes the upstream URL and `Host` itself, so a caller-supplied `H
 
 Dial-time canonicalisation is not implemented. The check runs once, against a configured value, so a hostname that resolves to a permitted address at startup and a blocked one later is not caught. Defeating DNS rebinding means binding the resolved address in the transport at connection time. `reference/README.md` lists this among the known limits. **[A]**
 
-### Fail closed
+### What happens when a dependency fails?
 
 | Failure | Required behaviour |
 |----|----|
-| Signing keys unfetchable, or key id unknown | **Deny.** Never fall back to a stale or unverified key |
+| No acceptable cached signing key, cache expired, or unknown key id cannot be resolved | **Deny.** A still-valid cached key may continue verifying its known key id; never use an expired or unverified key |
 | Secret store unavailable | **Deny.** No cached-credential reuse to paper over an outage |
 | Target session opened but its capability record did not persist | **Close the target session.** Never leave it orphaned |
 | Audit unavailable | **Deny by default.** A bounded durable spool is the only alternative |
 
-### Order revocation correctly
+### What happens when access is revoked?
 
 Revoke the capability first and atomically, refuse new work, drain what was already dispatched, and end the target session only when the last capability referencing it is gone.
 
 Shared upstream sessions are usually necessary, because many targets limit concurrent sessions — which is part of why this pattern exists. Sharing costs you something: revocation cannot undo an operation already dispatched, a shared session outlives any single capability, and compromise of one affects the whole cohort. B-conn targets cannot share at all.
 
-### Bound everything
+### Can one caller exhaust the broker?
 
 Being in-path for every request has a second implication beyond availability: per-subject and per-target quotas, deadlines on every dependency, bounded capability state. Without them, one tenant denies the whole estate. **[A]**
 
-### Decide who owns the assertion's lifetime
+### Who renews the engineer's expiring identity proof?
 
-The assertion expires, typically within the hour. Somebody has to renew it, or the system mysteriously stops working mid-afternoon.
+The identity assertion expires, typically within the hour. Some identity systems issue a longer-lived **refresh credential** that can obtain a new assertion. Somebody has to own that refresh process, or the broker session stops working when the assertion expires.
 
-If the broker renews, one condition governs whether that is safe: **a renewal grant must not outlive, or be renewable beyond, the session it belongs to.** Meet it and the broker gains nothing it did not already have. Miss it and the broker has quietly acquired a durable credential for every caller it has served — a more valuable target than the credentials it was built to protect.
+If the broker stores that refresh credential, one condition governs whether it is safe: **it must not outlive, or be renewable beyond, the engineer's identity-provider login session.** Meet that condition and the broker gains no longer-lived identity than the engineer already holds. Miss it and the broker quietly acquires a durable impersonation credential for every caller it has served.
 
-Renewal is lazy and request-driven: it happens when the token is about to be used, not on a timer. An idle session does not renew and should not. Two consequences fall out — you cannot verify renewal by waiting, only by driving traffic through the path, and the identity provider lands on the critical path of one request per renewal interval.
+In the reference implementation, renewal is lazy and request-driven: it runs when an assertion is about to be used, not on a timer. **[V]** An idle broker session does not renew. Two consequences follow: renewal can be tested only by driving traffic through the path, and the identity provider is on the critical path for one request per renewal interval. Capture of the refresh state is verified; an actual renewal firing has not yet been observed. **[U]**
 
 Decide whether renewal failure is loud or soft before you need to know. Returning the stale assertion avoids turning a recoverable expiry into an outage, but then an identity-provider failure presents as *the target* rejecting an expired token and the operator goes looking at the wrong component. If you choose soft, emit the refresh failure as its own event. **[A]**
 
-### Make security events distinguishable
+### Can operators distinguish routine expiry from an attack?
 
 `token expired` and `signature does not verify` are the same HTTP status to a caller and completely different events to an operator. One is routine. The other is someone attempting a forgery. If they look alike in what you emit, the second is lost in the noise of the first.
 
-## What a compromised broker gets
+## What does an attacker get by compromising the broker?
 
 A compromised broker can read whatever credential material is in its memory — the live target session, and anything it fetches from that point on — and can alter its own gates, scrubbing and audit. **[A]**
 
@@ -428,17 +446,18 @@ We learned both the hard way. A five-header watchlist reported a clean boundary 
 ## How do you add a new appliance safely?
 
 1.  Classify its authentication behavior using the table above. If it is Class C, stop — this pattern does not cover it.
-2.  If it returns a session that may be long-lived (Class A2), read the actual lifetime from a real appliance rather than trusting a default.
-3.  Record the five configuration values: login URL, login-request format, session-token field, session-lifetime field, and refresh URL. The login-request format is the ceremony; `reference/README.md` documents its grammar and gives three complete examples.
-4.  Decide whether the client is a machine or a browser. Browser applications need the login-response translation described above.
-5.  Create an **access grant**: which people may use the appliance, which destination they may reach, and how long their broker capability lasts. This is different from the refresh credential discussed in the renewal section.
-6.  Run the conformance test against the new path. Require both a full boundary census and a successful response from the intended downstream service.
+2.  If it returns a separate session (Class A1 or A2), determine where that session is carried. For the supported response-body form, record the login URL, login-request format, session-token field, session-lifetime field, and refresh URL. The login-request format is the ceremony; `reference/README.md` documents its grammar and gives three complete examples. If authentication is carried in `Set-Cookie`, the current implementation does not support it: add explicit cookie rewriting and opaque cookie state before onboarding the target.
+3.  For Class A2, reconfigure the appliance to enforce an acceptable finite lifetime. If that is impossible, handle it as Class B.
+4.  For Class B, design the broker to remain in-path for every use of the bearer credential; the five-value login exchange does not apply. For B-conn, allocate a dedicated authenticated connection per caller rather than sharing a session.
+5.  Determine whether the client can present authorization directly or whether its own login state depends on the appliance response. Only the latter needs login-response translation.
+6.  Create an **access grant**: which people may use the appliance, which destination they may reach, and how long their broker capability lasts. This is different from the refresh credential discussed in the renewal section.
+7.  Run the conformance test against the new path. Require a full boundary census, a successful response from the intended downstream service, and a check that no real authentication token or cookie reaches the client.
 
-Effort scales with distinct target *types*, not target count. The fifth device of a type you support is configuration; the first device of a new type is integration. Most estates have five to fifteen distinct types. **[A]**
+Effort scales with distinct login *protocols*, not device count. Another appliance using a JSON request-and-session exchange is configuration, even when its field names and nesting differ. A new serialization or challenge-response protocol is integration work. **[A]**
 
 ## What you get, and what you do not
 
-It removes the password from the headers and cookies of the boundary's record — the places credentials normally travel. It makes access attributable, because the secret store authorised a human rather than a machine. It makes revocation mean something, because what the operator holds is short-lived and individual.
+On the intended broker path, it keeps the appliance password and real appliance session token out of the boundary's headers and cookies. It makes access attributable at the broker and secret-store layers because authorization is evaluated for a person rather than only a machine. It makes broker access short-lived and individual.
 
 It does not guarantee nothing sensitive ever crosses. The broker does not read request bodies and does not restrict what a caller puts in one. Against a careless or hostile caller this is a partial control.
 
@@ -450,7 +469,7 @@ It does not hide who is asking. The boundary still sees identity and timing. Ide
 
 That test is what exposed two defects architecture review had missed. Both are closed in the reference: it strips the gateway's cookie and the unsigned identity header before the request leaves, and attributes from the subject the secret store established rather than from a header anybody could set. **[V]** The cookie fix on the gateway side was contributed upstream and is not in this repository. **[U]**
 
-The number at the top of this post is what the test reports today: across 469 consecutive requests, no credential-bearing material in any header or cookie, payload contents unexamined. **[M]** The test costs a day to build, works against implementations you did not write, and is worth having whether or not anybody funds the broker.
+Across 469 consecutive requests, the audit found none of the prohibited material in headers or cookies: no appliance password, real appliance session token, gateway session cookie, or unsigned identity header. The permitted signed assertion, opaque broker capability, and ordinary appliance cookies still crossed as designed. Request-body contents were not examined. **[M]** The test costs a day to build, works against implementations you did not write, and is worth having whether or not anybody funds the broker.
 
 ------------------------------------------------------------------------
 
