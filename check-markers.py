@@ -4,6 +4,10 @@
 The table is an index, so it goes stale the moment a new marker is used and
 not declared -- or a declared one stops being used. Both are silent failures
 in prose, so check them.
+
+The CANONICAL table lives in the appendix. No other document repeats it -- a
+second copy is a second thing to drift -- so every other page is checked for USE
+only, and must link to the appendix so a reader can find the definitions.
 """
 import re, pathlib, sys
 
@@ -25,19 +29,34 @@ def used(p):
         out |= {m.group(1) for m in USED.finditer(line)}
     return out
 
-paper = DOCS / "credential-broker-pattern.md"
-evaluation = DOCS / "gateway-evaluation.md"
+appendix = DOCS / "appendix.md"
 
-d_paper, d_eval = defined(paper), defined(evaluation)
+d_appendix = defined(appendix)
 fail = False
 
-if d_paper != d_eval:
-    print(f"  FAIL: tables disagree\n    paper: {d_paper}\n    eval:  {d_eval}")
+if not d_appendix:
+    print("  FAIL: the appendix carries no marker table; it is the canonical one")
     fail = True
 else:
-    print(f"  tables agree: {' '.join('[' + m + ']' for m in d_paper)}")
+    print(f"  canonical table: {' '.join('[' + m + ']' for m in d_appendix)}")
 
-declared = set(d_paper)
+# Exactly one table. A duplicate is a second thing to drift.
+for other in sorted(DOCS.glob("*.md")):
+    if other.name == "appendix.md":
+        continue
+    if defined(other):
+        print(f"  FAIL: {other.name} repeats the marker table; the appendix is canonical")
+        fail = True
+
+# Any page that USES a marker must link to where they are defined.
+for p_ in sorted(DOCS.glob("*.md")):
+    if p_.name == "appendix.md" or not used(p_):
+        continue
+    if "appendix.html" not in p_.read_text():
+        print(f"  FAIL: {p_.name} uses markers but never links to their definitions")
+        fail = True
+
+declared = set(d_appendix)
 all_used = set()
 for p in sorted(DOCS.glob("*.md")):
     u = used(p)

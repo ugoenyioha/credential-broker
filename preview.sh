@@ -57,7 +57,7 @@ STRIP
     --include-in-header=docs/_includes/head-custom.html \
     --include-before-body=<(cat <<HTML
 <div class="hdr"><h1>$3</h1><p>Brokered credential access across an inspecting boundary</p>
-<div class="nav"><a href="index.html">Overview</a><a href="credential-broker-pattern.html">The pattern</a><a href="gateway-evaluation.html">Gateway evaluation</a></div></div><main>
+<div class="nav"><a href="index.html">Overview</a><a href="credential-broker-pattern.html">The pattern</a><a href="gateway-evaluation.html">Gateway evaluation</a><a href="appendix.html">Appendix</a></div></div><main>
 HTML
 ) --include-after-body=<(echo "</main>") -o "$OUT/$2" 2>/dev/null \
   && echo "  rendered $2" || echo "  FAILED $2"
@@ -73,6 +73,7 @@ S
 render index.md                     index.html                     "Overview"
 render credential-broker-pattern.md credential-broker-pattern.html "The Credential Broker Pattern"
 render gateway-evaluation.md        gateway-evaluation.html        "Gateway evaluation"
+render appendix.md                  appendix.html                  "Appendix"
 for h in "$OUT"/*.html; do strip_title "$h"; done
 rm -f "$OUT/.tmp.md"
 echo "  open: file://$(pwd)/$OUT/index.html"
