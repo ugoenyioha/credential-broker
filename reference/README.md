@@ -125,7 +125,8 @@ Defaults below are the values in `loadConfig`. Blank means required.
 | `OPENBAO_JWT_MOUNT`, `OPENBAO_JWT_ROLE` | `oidc`, `switch-portal` | the per-user exchange |
 | `ALLOW_MACHINE_CREDENTIAL` | `false` | enables the workload-identity fallback. Defaults to false, and is **mutually exclusive** with `REQUIRE_USER_TOKEN` — setting both refuses to start, because pre-warming the shared session with machine identity stops per-user authorisation gating the fetch |
 | `ALLOW_NO_GATEWAY_AUTH` | `false` | removes the requirement for a shared secret from the gateway |
-| `LOGIN_PATH`, `TOKEN_FIELD`, `TIMEOUT_FIELD`, `REFRESH_PATH` | `/api/system/login`, `token`, `timeout`, `/api/token_refresh` | four of the five per-target parameters in the paper's §8. The fifth — **request shape** — is not configurable here: the login body is hardcoded as `{"user":…,"password":…}` JSON and the method as `PATCH`. A target using a different shape needs code, not configuration |
+| `LOGIN_PATH`, `TOKEN_FIELD`, `TIMEOUT_FIELD`, `REFRESH_PATH` | `/api/system/login`, `token`, `timeout`, `/api/token_refresh` | four of the five per-target parameters in the paper. See below for the fifth |
+| `LOGIN_METHOD`, `LOGIN_BODY` | `PATCH`, `{"user":"{{.User}}","password":"{{.Password}}"}` | the fifth: the **request shape**, expressed as a *ceremony*. `LOGIN_METHOD` is also the verb the appliance's own SPA uses to log in, so changing it changes which inbound request the broker answers rather than proxies |
 | `SYNTHETIC_TOKEN_TTL` | `15m` | lifetime of the handle given to the browser |
 
 Four guards are worth knowing because they are the ones that will stop you at startup:
@@ -143,6 +144,74 @@ Four guards are worth knowing because they are the ones that will stop you at st
 
 All four exist because the failure they prevent is silent. A broker that starts and serves is
 indistinguishable from a broker that starts and serves *safely*.
+
+### Writing a ceremony
+
+A ceremony is the shape of the target's login request, written as data. It is set through
+`LOGIN_BODY`, and it is the whole of the per-target work for the fifth parameter — onboarding a
+differently shaped target is a config change, not a code change.
+
+The language is Go [`text/template`](https://pkg.go.dev/text/template), deliberately restricted
+to a grammar with exactly two substitutions and nothing else:
+
+| You may write | Meaning |
+|---|---|
+| literal text | copied to the body verbatim |
+| `{{.User}}` | the configured `USERNAME`, escaped for a JSON string |
+| `{{.Password}}` | the credential from the secret store, escaped for a JSON string. **Exactly once** |
+
+Three real targets, for reference. Each is a complete `LOGIN_BODY`:
+
+```sh
+# The reference appliance (the default)
+LOGIN_METHOD=PATCH
+LOGIN_BODY='{"user":"{{.User}}","password":"{{.Password}}"}'
+
+# F5 BIG-IP iControl REST — same flat shape, different key names, plus a constant
+LOGIN_METHOD=POST
+LOGIN_PATH=/mgmt/shared/authn/login
+LOGIN_BODY='{"username":"{{.User}}","password":"{{.Password}}","loginProviderName":"tmos"}'
+
+# FortiManager — the credential nested inside a JSON-RPC envelope
+LOGIN_METHOD=POST
+LOGIN_PATH=/jsonrpc
+LOGIN_BODY='{"id":1,"method":"exec","params":[{"url":"/sys/login/user","data":{"user":"{{.User}}","passwd":"{{.Password}}"}}]}'
+TOKEN_FIELD=session
+```
+
+Everything else in the template language is **rejected at startup**, including `{{if}}`,
+`{{range}}`, `{{with}}`, `{{template}}`, comments, variable bindings (`{{$x := …}}`), pipelines
+and function calls. This is not a style rule. Each of those can emit a value more than once, and
+the guarantee worth having is that the credential appears in the body exactly once, at a
+position a reviewer can point to. Whitelisting the two constructs that are needed — rather than
+blacklisting the ones that are dangerous — is what keeps that true if the template language
+gains features later.
+
+You do not need to escape the credential, and you cannot forget to: `{{.User}}` and
+`{{.Password}}` are escaped for their JSON string context before the template runs, so a
+password containing `"` or `\` stays one string value instead of becoming structure. A ceremony
+author never handles the raw value.
+
+A ceremony describes a **body**, never a destination. There is no field naming a URL, and a URL
+written as literal text is just characters in a body already addressed to `UPSTREAM_URL` +
+`LOGIN_PATH`. That is the property that makes it safe to accept a ceremony from a team that owns
+a target but is not trusted with its credential — a description cannot exfiltrate, because a
+description does not execute.
+
+These mistakes are caught at startup rather than at first login, while nothing is at stake:
+
+| Ceremony | Rejected because |
+|---|---|
+| `{"user":"{{.User}}"}` | no `{{.Password}}` — the request would carry no credential |
+| `{"a":"{{.Password}}","b":"{{.Password}}"}` | the credential may appear once, not twice |
+| `{"p":"{{.Passwrd}}"}` | unknown substitution; it would otherwise render empty |
+| `{"p":"{{.Password}}",}` | renders to invalid JSON |
+| `{{if .User}}…{{end}}` | control flow can repeat a value |
+| `LOGIN_METHOD=GET` | must be `POST`, `PUT` or `PATCH` |
+
+**Where ceremonies stop.** A body template describes JSON bodies. A target that logs in with
+form encoding, XML, or a multi-step challenge-response handshake is outside what this expresses,
+and needs the concept extended rather than merely configured.
 
 ## Running the tests
 
@@ -193,9 +262,10 @@ run means anything:
 - one upstream appliance session is shared across operators
 - a workload-identity fallback exists (`ALLOW_MACHINE_CREDENTIAL`). It is off by default and
   cannot be combined with per-user mode — the two are mutually exclusive at startup
-- §8 of the paper claims a new target costs five parameters. This implementation
-  parameterises four; the login request shape is hardcoded. The claim holds for targets
-  matching that shape and overstates for the rest
+- the paper claims a new target costs five parameters and no code. All five are configuration
+  here, the fifth as a ceremony (see [Writing a ceremony](#writing-a-ceremony)). The remaining
+  limit is what a ceremony can express: JSON login bodies. Form-encoded, XML, or
+  challenge-response logins still need code
 - renewal of the caller's assertion is implemented; its capture is verified, its firing is not
 - **§11's destination guard is implemented at startup, not at dial time.** Redirects are
   refused on every credential-carrying client (`refuseRedirects`, with a regression test

@@ -409,7 +409,7 @@ We learned both the hard way. A five-header watchlist reported a clean boundary 
 
 1.  Classify it. If Class C, stop — this does not cover it.
 2.  For A2 candidates, read the session lifetime off a real device.
-3.  Capture the five parameters: login path, request shape, credential location, TTL, refresh.
+3.  Capture the five parameters: login path, request shape, credential location, TTL, refresh. The request shape is written as a ceremony; `reference/README.md` documents the grammar and gives the shapes for three real targets.
 4.  Decide whether callers are machines or browsers. Browsers need login interception.
 5.  Create the grant: subject set, destination, capability TTL.
 6.  Run the conformance test against the new path, with a response-side signal.
