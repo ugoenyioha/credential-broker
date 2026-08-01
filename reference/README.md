@@ -102,9 +102,11 @@ UPSTREAM_URL=https://192.0.2.20 \
 ./broker
 ```
 
-It will refuse to start if `REQUIRE_USER_TOKEN` is set without a key set and
-issuer. That is deliberate — see the guards below. With those five set it listens
-on `:8080` and expects the caller's assertion in `X-Portal-User-Token`.
+It will refuse to start if `REQUIRE_USER_TOKEN` is set without a key set, an
+issuer and an audience, or if `UPSTREAM_URL` names a destination no appliance
+could plausibly live on. That is deliberate — see the guards below. With those
+five set it listens on `:8080` and expects the caller's assertion in
+`X-Portal-User-Token`.
 
 To exercise it you need an assertion the configured issuer would sign. The tests
 do this with a local key pair; see `verify_testhelpers_test.go` for the shape.
@@ -119,21 +121,27 @@ Defaults below are the values in `loadConfig`. Blank means required.
 |---|---|---|
 | `REQUIRE_USER_TOKEN` | `true` | per-user mode. With this set, `OIDC_JWKS_URL` and `OIDC_ISSUER` are mandatory and startup **fails** without them |
 | `USER_TOKEN_HEADER` | `X-Portal-User-Token` | where the forwarded assertion arrives |
-| `OIDC_JWKS_URL`, `OIDC_ISSUER`, `OIDC_AUDIENCE` | — | verification inputs; audience checking is skipped if unset, which you almost certainly do not want |
+| `OIDC_JWKS_URL`, `OIDC_ISSUER`, `OIDC_AUDIENCE` | — | verification inputs. All three are **required** in per-user mode and startup fails without them. Audience was once optional, and unset it did not weaken verification loudly — the check was skipped, so a token minted for a different relying party verified here with the correct signature and issuer |
 | `OPENBAO_JWT_MOUNT`, `OPENBAO_JWT_ROLE` | `oidc`, `switch-portal` | the per-user exchange |
 | `ALLOW_MACHINE_CREDENTIAL` | `false` | enables the workload-identity fallback. Defaults to false, and is **mutually exclusive** with `REQUIRE_USER_TOKEN` — setting both refuses to start, because pre-warming the shared session with machine identity stops per-user authorisation gating the fetch |
 | `ALLOW_NO_GATEWAY_AUTH` | `false` | removes the requirement for a shared secret from the gateway |
 | `LOGIN_PATH`, `TOKEN_FIELD`, `TIMEOUT_FIELD`, `REFRESH_PATH` | `/api/system/login`, `token`, `timeout`, `/api/token_refresh` | four of the five per-target parameters in the paper's §8. The fifth — **request shape** — is not configurable here: the login body is hardcoded as `{"user":…,"password":…}` JSON and the method as `PATCH`. A target using a different shape needs code, not configuration |
 | `SYNTHETIC_TOKEN_TTL` | `15m` | lifetime of the handle given to the browser |
 
-Two guards are worth knowing because they are the ones that will stop you at startup:
+Four guards are worth knowing because they are the ones that will stop you at startup:
 
 - `REQUIRE_USER_TOKEN` set without a key set or issuer → refuses to start rather than falling
   back to an unverified check
+- `REQUIRE_USER_TOKEN` set without an audience → refuses to start. Unset, the audience check
+  is skipped rather than failed, so a token minted for a different relying party is accepted
 - `REQUIRE_USER_TOKEN` false without `GATEWAY_SHARED_SECRET` → refuses to start, because the
   broker would then be trusting anything that can reach it
+- `UPSTREAM_URL` naming a non-HTTP scheme, no host, or a loopback / link-local / unspecified
+  / multicast address → refuses to start. `169.254.169.254` is the case that matters: it is
+  the cloud metadata service, and a broker pointed there would send it the appliance
+  credential
 
-Both exist because the failure they prevent is silent. A broker that starts and serves is
+All four exist because the failure they prevent is silent. A broker that starts and serves is
 indistinguishable from a broker that starts and serves *safely*.
 
 ## Running the tests
@@ -189,17 +197,15 @@ run means anything:
   parameterises four; the login request shape is hardcoded. The claim holds for targets
   matching that shape and overstates for the rest
 - renewal of the caller's assertion is implemented; its capture is verified, its firing is not
-- **§11's destination guard is only partly implemented.** Redirects are refused on every
-  credential-carrying client (`refuseRedirects`, with a regression test that asserts the
-  redirect target received nothing). Dial-time canonicalisation of the resolved address, and
-  blocking loopback / link-local / control-plane ranges, are **not** implemented — the
-  upstream URL is accepted as configured. Deployments relying on §11 in full must supply
-  that at the network layer
-- **`OIDC_AUDIENCE` is not required at startup.** Per-user mode demands a key set and an
-  issuer but will start without an audience, and audience checking is skipped when it is
-  unset. The prose elsewhere describes verification as signature, issuer, audience and
-  expiry; that is true of a correctly configured deployment, not of every deployment this
-  binary permits
+- **§11's destination guard is implemented at startup, not at dial time.** Redirects are
+  refused on every credential-carrying client (`refuseRedirects`, with a regression test
+  asserting the redirect target received nothing), and `validateUpstreamURL` rejects a
+  non-HTTP scheme, a missing host, and loopback / link-local / unspecified / multicast
+  addresses — including `169.254.169.254`, the cloud metadata service. What is **not**
+  implemented is dial-time canonicalisation: a hostname that resolves to a permitted address
+  at startup and a blocked one later is not caught. Defeating DNS rebinding requires binding
+  the resolved address in the transport at connection time. Deployments needing that must
+  supply it at the network layer
 - **the fail-closed and revocation rules in §11 are partial.** Signing-key refresh fails
   closed and there is no credential cache, but capability state is in process memory only,
   there is no audit-availability gate, and revocation is not atomic with draining in-flight

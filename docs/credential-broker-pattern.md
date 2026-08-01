@@ -570,9 +570,25 @@ missing: nobody argued against it. And a network policy that confines egress to 
 limits the blast radius, which is why this was survivable here — but the reference is what
 other deployments inherit, and they do not inherit that policy.
 
-The remaining controls in this paragraph — dial-time address canonicalisation, and blocking
-loopback, link-local and control-plane ranges — are **[A]** and **not implemented** in the
-reference. `reference/README.md` lists them among its known limits.
+Blocking implausible destinations is implemented too, though only at startup. **[V]** The
+reference refuses to start on a non-HTTP scheme, a URL with no host, or an address that is
+loopback, link-local, unspecified or multicast. `url.Parse` alone is not a check: it accepts
+`file:///etc/passwd`, `javascript:alert(1)`, a bare `not-a-url` and the empty string without
+error, so a service configured with any of them starts and fails later — while holding the
+credential. The link-local case is the one that earns its place: `169.254.169.254` is the
+cloud instance metadata service, and a broker pointed there would present the appliance
+credential to an endpoint that returns the node's own identity.
+
+**Dial-time canonicalisation remains unimplemented. [A]** The check above runs once, against
+a configured value. A hostname that resolves to a permitted address at startup and a blocked
+one later is not caught — that is DNS rebinding, and defeating it requires enforcement in the
+transport at connection time, binding the resolved address rather than the name. The
+reference does not do this; `reference/README.md` records it among the known limits.
+
+Worth noting what made the difference between the two. The redirect and destination controls
+were both written down here as rules that must hold. One was implemented and one was not, and
+nothing in the document distinguished them — which is why the marker now carries that
+distinction rather than the prose alone.
 
 ### Order revocation correctly
 

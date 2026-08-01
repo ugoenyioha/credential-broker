@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -144,7 +145,8 @@ func TestPerUserModeWithoutVerifierRefusesToStart(t *testing.T) {
 	t.Run("no jwks url", func(t *testing.T) {
 		base(t)
 		t.Setenv("OIDC_ISSUER", "https://idp.invalid/oauth2/token") // present
-		t.Setenv("OIDC_JWKS_URL", "")                               // the omission under test
+		t.Setenv("OIDC_AUDIENCE", "urn:example:appliance-credential")
+		t.Setenv("OIDC_JWKS_URL", "") // the omission under test
 		if _, err := loadConfig(); err == nil {
 			t.Fatal("SECURITY FAILURE: started in per-user mode with no signature verification")
 		}
@@ -153,16 +155,33 @@ func TestPerUserModeWithoutVerifierRefusesToStart(t *testing.T) {
 	t.Run("no issuer", func(t *testing.T) {
 		base(t)
 		t.Setenv("OIDC_JWKS_URL", "https://idp.invalid/oauth2/jwks") // present
-		t.Setenv("OIDC_ISSUER", "")                                  // the omission under test
+		t.Setenv("OIDC_AUDIENCE", "urn:example:appliance-credential")
+		t.Setenv("OIDC_ISSUER", "") // the omission under test
 		if _, err := loadConfig(); err == nil {
 			t.Fatal("SECURITY FAILURE: started with no trusted issuer; a valid signature from any issuer would pass")
 		}
 	})
 
-	t.Run("both present starts", func(t *testing.T) {
+	// Audience is the third of the three. Unset, verification does not fail
+	// loudly -- audienceContains returns true and the check is skipped -- so a
+	// token the issuer minted for a DIFFERENT relying party verifies here with
+	// the correct signature and the correct issuer. That is precisely the
+	// token-substitution case the audience claim exists to answer.
+	t.Run("no audience", func(t *testing.T) {
+		base(t)
+		t.Setenv("OIDC_JWKS_URL", "https://idp.invalid/oauth2/jwks") // present
+		t.Setenv("OIDC_ISSUER", "https://idp.invalid/oauth2/token")  // present
+		t.Setenv("OIDC_AUDIENCE", "")                                // the omission under test
+		if _, err := loadConfig(); err == nil {
+			t.Fatal("SECURITY FAILURE: started with audience checking disabled; a token minted for another relying party would be accepted")
+		}
+	})
+
+	t.Run("all three present starts", func(t *testing.T) {
 		base(t)
 		t.Setenv("OIDC_JWKS_URL", "https://idp.invalid/oauth2/jwks")
 		t.Setenv("OIDC_ISSUER", "https://idp.invalid/oauth2/token")
+		t.Setenv("OIDC_AUDIENCE", "urn:example:appliance-credential")
 		if _, err := loadConfig(); err != nil {
 			t.Fatalf("refused to start with a complete configuration: %v", err)
 		}
@@ -243,4 +262,100 @@ func TestLoginBoundsTheCapabilityByTheTokensExpiry(t *testing.T) {
 				tok[:8], rec.expires.Format(time.TimeOnly), tokenExpiry.Format(time.TimeOnly))
 		}
 	}
+}
+
+// §11 requires refusing a destination the grant cannot have intended. url.Parse
+// is not that check: it accepts "file:///etc/passwd", "javascript:alert(1)", a
+// bare "not-a-url" and the empty string without error, so a service configured
+// with any of them starts and fails later -- while holding the appliance
+// password.
+//
+// The addresses matter more than the shapes. 169.254.169.254 is the cloud
+// instance metadata service; a broker pointed there would present the appliance
+// credential to an endpoint that returns the node's own identity.
+func TestUpstreamURLRefusesImplausibleDestinations(t *testing.T) {
+	refuse := []struct{ raw, why string }{
+		{"file:///etc/passwd", "a file URL is not an appliance"},
+		{"javascript:alert(1)", "not an HTTP scheme"},
+		{"not-a-url", "no scheme and no host"},
+		{"https://", "no host"},
+		{"http://169.254.169.254", "cloud metadata service -- would receive the appliance credential"},
+		{"http://169.254.169.254:80/latest/meta-data/", "metadata service with a path"},
+		{"https://127.0.0.1:8443", "loopback reaches this pod, not an appliance"},
+		{"https://[::1]:8443", "IPv6 loopback"},
+		{"https://0.0.0.0", "the unspecified address"},
+	}
+	for _, c := range refuse {
+		t.Run(c.raw, func(t *testing.T) {
+			u, err := url.Parse(c.raw)
+			if err != nil {
+				return // rejected before us; fine
+			}
+			if err := validateUpstreamURL(u); err == nil {
+				t.Fatalf("SECURITY FAILURE: accepted %q as an upstream (%s)", c.raw, c.why)
+			}
+		})
+	}
+
+	// Plausible destinations must still work, or the guard is a denial of
+	// service rather than a control. A hostname is NOT resolved here: startup
+	// would then depend on DNS, and resolving would not bind the result anyway.
+	for _, raw := range []string{
+		"https://192.0.2.20",
+		"https://192.0.2.20:8443",
+		"https://appliance.example.internal",
+		"http://appliance.example.internal:8080/base",
+	} {
+		t.Run("allow "+raw, func(t *testing.T) {
+			u, err := url.Parse(raw)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if err := validateUpstreamURL(u); err != nil {
+				t.Fatalf("refused a plausible upstream %q: %v", raw, err)
+			}
+		})
+	}
+}
+
+// The guard above tests the RULE. This tests that the rule is WIRED IN.
+//
+// Written after a mutation check embarrassed the first version: deleting the
+// validateUpstreamURL call from loadConfig left the rule's own test passing,
+// because that test calls the function directly. A control that is implemented
+// but not invoked is not a control, and only a test that goes through the real
+// configuration path can tell the difference.
+func TestLoadConfigRefusesAnImplausibleUpstream(t *testing.T) {
+	base := func(t *testing.T) {
+		t.Setenv("REQUIRE_USER_TOKEN", "true")
+		t.Setenv("ALLOW_MACHINE_CREDENTIAL", "false")
+		t.Setenv("OPENBAO_ADDR", "https://bao.invalid")
+		t.Setenv("OIDC_JWKS_URL", "https://idp.invalid/oauth2/jwks")
+		t.Setenv("OIDC_ISSUER", "https://idp.invalid/oauth2/token")
+		t.Setenv("OIDC_AUDIENCE", "urn:example:appliance-credential")
+	}
+
+	t.Run("metadata service", func(t *testing.T) {
+		base(t)
+		t.Setenv("UPSTREAM_URL", "http://169.254.169.254")
+		if _, err := loadConfig(); err == nil {
+			t.Fatal("SECURITY FAILURE: started with the cloud metadata service as its upstream; the appliance credential would be sent there")
+		}
+	})
+
+	t.Run("non-http scheme", func(t *testing.T) {
+		base(t)
+		t.Setenv("UPSTREAM_URL", "file:///etc/passwd")
+		if _, err := loadConfig(); err == nil {
+			t.Fatal("started with a file:// upstream")
+		}
+	})
+
+	t.Run("plausible appliance starts", func(t *testing.T) {
+		base(t)
+		t.Setenv("UPSTREAM_URL", "https://192.0.2.20")
+		if _, err := loadConfig(); err != nil {
+			t.Fatalf("refused a plausible appliance: %v", err)
+		}
+	})
 }

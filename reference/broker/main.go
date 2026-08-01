@@ -47,6 +47,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -175,6 +176,11 @@ func loadConfig() (*config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse UPSTREAM_URL: %w", err)
 	}
+	// Refuse a destination that was wrong when it was configured, rather than
+	// discovering it while holding the appliance password.
+	if err := validateUpstreamURL(u); err != nil {
+		return nil, err
+	}
 	c.upstreamURL = u
 
 	if c.openbaoAddr == "" {
@@ -217,6 +223,21 @@ func loadConfig() (*config, error) {
 	if c.requireUserToken && c.tokenIssuer == "" {
 		return nil, errors.New("REQUIRE_USER_TOKEN=true needs OIDC_ISSUER: a valid signature from " +
 			"an unexpected issuer is not an authorisation")
+	}
+	// Audience is the third of the three, and was the one that could be omitted.
+	// An unset audience does not weaken verification loudly -- it silently skips
+	// the check, so a token the issuer minted for a DIFFERENT relying party
+	// verifies here perfectly: right signature, right issuer, wrong intended
+	// recipient. That is the token-substitution case audience exists to answer,
+	// and leaving it optional made the strongest configuration the one you had
+	// to know to ask for.
+	//
+	// Deliberately not defaulted: there is no value this service could guess
+	// that would be safer than refusing to start.
+	if c.requireUserToken && c.tokenAudience == "" {
+		return nil, errors.New("REQUIRE_USER_TOKEN=true needs OIDC_AUDIENCE: without it audience " +
+			"checking is skipped entirely, so a token minted for another relying party -- correct " +
+			"signature, correct issuer -- is accepted as authorisation here")
 	}
 	return c, nil
 }
@@ -262,6 +283,65 @@ func env(k, def string) string {
 var errRedirectRefused = errors.New(
 	"refusing to follow a redirect: the destination would not be the one the grant " +
 		"authorised, and credential-carrying requests must not be replayed to it")
+
+// ------------------------------------------------------- destination guard
+
+// validateUpstreamURL is the startup half of §11's destination guard: refuse a
+// destination the grant plainly cannot have intended, before the service ever
+// carries a credential to it.
+//
+// url.Parse alone is not validation. It accepts "file:///etc/passwd",
+// "javascript:alert(1)", a bare "not-a-url" and the empty string, returning a
+// URL with an empty scheme or empty host and no error. A service that starts on
+// one of those fails later, confusingly, at the moment it is holding the
+// appliance password.
+//
+// The address check is the one that matters. 169.254.169.254 is the cloud
+// instance metadata service on every major provider; a broker pointed there
+// would present the appliance credential to an endpoint that hands back the
+// node's own identity. Loopback reaches whatever else shares the pod. Neither
+// is a plausible appliance, and both are classic SSRF destinations.
+//
+// This is a STARTUP check on a configured value, not a per-dial one. It cannot
+// stop a name that resolves to a blocked address later — DNS rebinding defeats
+// name-based checks by design. What it does stop is a destination that was
+// wrong when it was written down. The residual is recorded in §15 and in
+// reference/README.md rather than papered over: complete protection needs
+// dial-time enforcement in the transport, which this reference does not do.
+func validateUpstreamURL(u *url.URL) error {
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("UPSTREAM_URL scheme must be http or https, got %q", u.Scheme)
+	}
+	if u.Hostname() == "" {
+		return errors.New("UPSTREAM_URL has no host")
+	}
+	// A literal address can be checked now. A name cannot be resolved here
+	// without making startup depend on DNS, and resolving it would not bind the
+	// result anyway -- see the note above.
+	if ip := net.ParseIP(u.Hostname()); ip != nil {
+		if err := checkDestinationIP(ip); err != nil {
+			return fmt.Errorf("UPSTREAM_URL %s: %w", u.Hostname(), err)
+		}
+	}
+	return nil
+}
+
+// checkDestinationIP rejects addresses no appliance should live on. Split out so
+// the reasoning is testable directly, and so a dial-time enforcement point can
+// reuse exactly this rule rather than reimplementing it.
+func checkDestinationIP(ip net.IP) error {
+	switch {
+	case ip.IsLoopback():
+		return errors.New("loopback is not a valid destination: it reaches this pod, not an appliance")
+	case ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast():
+		return errors.New("link-local is not a valid destination: 169.254.169.254 is the cloud metadata service, which would receive the appliance credential")
+	case ip.IsUnspecified():
+		return errors.New("the unspecified address is not a valid destination")
+	case ip.IsMulticast():
+		return errors.New("multicast is not a valid destination for a credential-carrying request")
+	}
+	return nil
+}
 
 // refuseRedirects is the CheckRedirect for every client in this service that
 // carries credential material — the caller's assertion to the secret store, the
