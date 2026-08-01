@@ -6,7 +6,9 @@ description: >-
 theme: jekyll-theme-cayman
 show_downloads: false
 
-# Diagrams are committed as rendered SVG next to their PlantUML source, so the
-# site builds without a PlantUML step in CI.
+# Static views are committed next to their PlantUML or Python diagrams source,
+# so the site needs no diagram build step. Sequences render from Mermaid blocks
+# using _includes/head-custom.html.
 exclude:
   - "*.puml"
+  - "*.py"

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Identity provider">
+  <path d="M64 4 116 24v36c0 32-20 55-52 64C32 115 12 92 12 60V24Z" fill="#12243A"/>
+  <circle cx="54" cy="55" r="15" fill="none" stroke="#FFFFFF" stroke-width="9"/>
+  <path d="m65 66 26 26" stroke="#FFFFFF" stroke-width="9" stroke-linecap="round"/>
+  <path d="m84 85 9-9m-19-1 9-9" stroke="#FFFFFF" stroke-width="9" stroke-linecap="round"/>
+</svg>

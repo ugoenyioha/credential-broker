@@ -14,6 +14,10 @@ cd "$(dirname "$0")"
 OUT=preview
 rm -rf "$OUT"; mkdir -p "$OUT"
 cp -R docs/diagrams "$OUT/diagrams" 2>/dev/null
+# Media referenced by the pages. Without this the preview 404s on the embedded
+# recording while Pages serves it fine -- a preview that lies about the artifact
+# is worse than no preview.
+cp docs/*.mp4 "$OUT/" 2>/dev/null
 
 cat > "$OUT/style.css" <<'CSS'
 :root { --accent:#159957; --accent2:#155799; }
@@ -29,6 +33,7 @@ h3 { margin-top:1.6em; }
 code { background:#f6f8fa; padding:.15em .35em; border-radius:3px; font-size:.88em; }
 pre { background:#f6f8fa; padding:1rem; overflow:auto; border-radius:5px; }
 pre code { background:none; padding:0; }
+.mermaid { margin:1.5rem 0; overflow-x:auto; text-align:center; }
 blockquote { border-left:4px solid var(--accent); margin:1.2em 0; padding:.3em 1em; color:#444; background:#f8fdfa; }
 table { border-collapse:collapse; width:100%; margin:1.2em 0; display:block; overflow-x:auto; }
 th,td { border:1px solid #dfe2e5; padding:.5em .8em; text-align:left; vertical-align:top; }
@@ -49,6 +54,7 @@ pathlib.Path(dst).write_text('\n'.join(lines))
 STRIP
   pandoc "$OUT/.tmp.md" -f gfm -t html5 --standalone --metadata title="$3" \
     --css style.css \
+    --include-in-header=docs/_includes/head-custom.html \
     --include-before-body=<(cat <<HTML
 <div class="hdr"><h1>$3</h1><p>Brokered credential access across an inspecting boundary</p>
 <div class="nav"><a href="index.html">Overview</a><a href="credential-broker-pattern.html">The pattern</a><a href="gateway-evaluation.html">Gateway evaluation</a></div></div><main>

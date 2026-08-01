@@ -5,3 +5,8 @@ __pycache__/
 /reference/broker/broker
 /reference/broker/switch-portal
 preview/
+docs/diagrams/*.png
+!docs/diagrams/d1-deployment-diagrams.png
+# Icon PNGs are rendered from the committed SVG sources by the command in
+# README.md, so the published page needs no SVG-capable diagram build step.
+!docs/diagrams/icons/*.png

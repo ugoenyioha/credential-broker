@@ -24,7 +24,7 @@ rectangle "MONITOR ZONE" as MID #F7F3E8 {
   rectangle "Monitor — inspecting middlebox\nTLS terminated · full packet capture\ncaptures retained indefinitely" as MONITOR
 }
 
-rectangle "CREDENTIAL ZONE" as LOW #F3F1EE {
+rectangle "CREDENTIAL ZONE" as LOW #EDF5EE {
   rectangle "Credential Broker" as BR
   rectangle "Secret Store" as V
   rectangle "Target System" as T
@@ -45,14 +45,14 @@ note right of MID
 
   MUST NEVER cross:
     • the target credential
-    • anything derived from it that outlives the request
-    • the broker's own session credentials
+    • a target-issued session credential
+    • the broker's internal session state
     • identity asserted anywhere but inside the signed token
 end note
 
 note bottom of LOW
   Everything here is reachable only from inside the zone.
-  If the boundary is compromised, the attacker holds a token
-  that expires — not a password that does not.
+  If the boundary is compromised, the attacker holds bounded,
+  expiring material — not a password that does not expire.
 end note
 @enduml
