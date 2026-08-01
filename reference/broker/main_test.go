@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -900,5 +902,61 @@ func TestSubjectLabelNeverEmitsTheRawSentinel(t *testing.T) {
 	}
 	if got := subjectLabel("ugo@example.invalid"); got != "ugo@example.invalid" {
 		t.Fatalf("real subject was rewritten to %q", got)
+	}
+}
+
+// A redirect must never be followed on a credential-carrying request.
+//
+// This is the regression test for a DEMONSTRATED defect, not a hypothetical
+// one. Go's http.Client left at its default follows up to 10 redirects, and for
+// 307/308 it REPLAYS the method and body. The appliance login sends the fetched
+// password in its body, so a redirect from the login endpoint delivered that
+// password verbatim to whatever host the redirect named.
+//
+// §11 of the paper prescribes "refuse redirects" as a rule that must hold. It
+// was prescribed and not implemented; this test is what keeps it implemented.
+//
+// The assertion that matters is NOT that an error was returned -- an error is
+// also reported after a leak. It is that the redirect target received NOTHING.
+func TestRefuseRedirectsBlocksCredentialReplay(t *testing.T) {
+	var mu sync.Mutex
+	var secondHopBodies []string
+
+	// Stands in for wherever a redirect might point.
+	secondHop := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		secondHopBodies = append(secondHopBodies, string(b))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"restful_res":{"token":"attacker-issued"}}`))
+	}))
+	defer secondHop.Close()
+
+	// The "appliance" answers the login with a 307 instead of a session.
+	appliance := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, secondHop.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer appliance.Close()
+
+	bao := fakeOpenBao(t)
+	defer bao.Close()
+
+	p := newTestPortal(t, appliance.URL, bao.URL)
+	_, err := p.sess.loginLocked("")
+
+	if err == nil {
+		t.Fatal("SECURITY FAILURE: login followed a redirect and reported success")
+	}
+	if !errors.Is(err, errRedirectRefused) {
+		t.Fatalf("login failed, but not by refusing the redirect: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(secondHopBodies) != 0 {
+		t.Fatalf("SECURITY FAILURE: the redirect target received %d request(s); "+
+			"first body was %q -- the appliance credential was replayed",
+			len(secondHopBodies), secondHopBodies[0])
 	}
 }

@@ -243,6 +243,41 @@ func env(k, def string) string {
 	return def
 }
 
+// ---------------------------------------------------------- redirect refusal
+
+// errRedirectRefused is returned instead of following a redirect. §11 of the
+// paper requires it, and the reason is specific rather than hygienic: the
+// appliance login request carries the fetched credential in its BODY, and Go's
+// http.Client, left at its default, follows up to 10 redirects — replaying the
+// method and body each time for 307/308. A redirect from the login endpoint
+// therefore hands the appliance password to whatever host the redirect names.
+//
+// Demonstrated, not theorised: a client configured as this one was, PATCHing a
+// login body to a server answering 307, delivers the password to the second
+// hop verbatim. See TestRefuseRedirectsBlocksCredentialReplay.
+//
+// A redirect on any of these paths is not a routine condition to be followed —
+// it means the destination is not the one the grant authorised. Refuse, and let
+// the caller see the error.
+var errRedirectRefused = errors.New(
+	"refusing to follow a redirect: the destination would not be the one the grant " +
+		"authorised, and credential-carrying requests must not be replayed to it")
+
+// refuseRedirects is the CheckRedirect for every client in this service that
+// carries credential material — the caller's assertion to the secret store, the
+// appliance password to the appliance, and the issuer's signing keys.
+// Centralised so a client added later cannot silently omit the control.
+//
+// It returns a real error rather than http.ErrUseLastResponse. Both stop the
+// replay, but ErrUseLastResponse hands the 3xx back with err == nil, so a
+// caller that only checks err would treat a redirect as a normal response and
+// fall through to its status check. Failing loudly is the point: a redirect
+// here is a destination the grant did not authorise, not a routine hop.
+func refuseRedirects(req *http.Request, via []*http.Request) error {
+	return fmt.Errorf("%w: %s redirected to %s after %d hop(s)",
+		errRedirectRefused, via[len(via)-1].URL.Host, req.URL.Host, len(via))
+}
+
 // ---------------------------------------------------------------- OpenBao
 
 type openbao struct {
@@ -263,7 +298,11 @@ func newOpenBao(cfg *config) (*openbao, error) {
 		}
 		tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
-	return &openbao{cfg: cfg, client: &http.Client{Timeout: 15 * time.Second, Transport: tr}}, nil
+	return &openbao{cfg: cfg, client: &http.Client{
+		Timeout:       15 * time.Second,
+		Transport:     tr,
+		CheckRedirect: refuseRedirects, // carries the caller's assertion
+	}}, nil
 }
 
 // login exchanges the pod's Kubernetes service account token for an OpenBao
@@ -351,8 +390,20 @@ func (o *openbao) loginWithUserToken(idToken string) (string, error) {
 	if out.Auth.ClientToken == "" {
 		return "", errors.New("openbao jwt login returned no client_token")
 	}
-	slog.Info("exchanged user token for an OpenBao token",
-		"openbao_policies", out.Auth.Policies, "user", out.Auth.Metadata["role"])
+	// Label this field for what it IS. It was previously emitted as "user",
+	// which reads as the human and is not: Metadata["role"] is the OpenBao ROLE
+	// the exchange bound to (e.g. "switch-portal"). A reviewer reading this line
+	// reasonably concluded the vault was authorising the workload rather than
+	// the operator -- it is not, the operator's own assertion is what was
+	// exchanged above, but the log said otherwise.
+	//
+	// This is the §14 defect in miniature, in the component whose entire purpose
+	// is attribution: authorisation used the strong channel, the local log
+	// described it with the weak one. The authoritative per-human record is
+	// OpenBao's own audit log, keyed to the assertion presented here.
+	slog.Info("exchanged the caller's assertion for an OpenBao token",
+		"openbao_policies", out.Auth.Policies,
+		"openbao_role", out.Auth.Metadata["role"])
 	return out.Auth.ClientToken, nil
 }
 
@@ -411,9 +462,13 @@ func newUpstreamSession(cfg *config, bao *openbao) *upstreamSession {
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec
 	}
 	return &upstreamSession{
-		cfg:    cfg,
-		bao:    bao,
-		client: &http.Client{Timeout: 20 * time.Second, Transport: tr},
+		cfg: cfg,
+		bao: bao,
+		client: &http.Client{
+			Timeout:       20 * time.Second,
+			Transport:     tr,
+			CheckRedirect: refuseRedirects, // carries the appliance password
+		},
 	}
 }
 
@@ -662,7 +717,11 @@ func httpClientWithCA(caFile string, timeout time.Duration) (*http.Client, error
 		}
 		tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
-	return &http.Client{Timeout: timeout, Transport: tr}, nil
+	return &http.Client{
+		Timeout:       timeout,
+		Transport:     tr,
+		CheckRedirect: refuseRedirects, // fetches the issuer's signing keys
+	}, nil
 }
 
 func newPortal(cfg *config, sess *upstreamSession) *portal {
