@@ -5,19 +5,13 @@ title: The pattern
 
 # Letting SSO reach a device that only understands passwords
 
-An engineer signs in with SSO and lands on the administration page of a network switch. The switch has no idea what SSO is — it knows a username and a password, shared by everyone who administers it. Between them sits a device that decrypts every connection, inspects it, and keeps the recording indefinitely.
+An engineer signs in with single sign-on and needs the administration page of a network switch. The switch has no idea what single sign-on is — it knows a username and password, shared by everyone who administers it. Between them sits an inspection system that decrypts every connection, examines it, and keeps the recording indefinitely.
 
-Across **469 consecutive requests** on that recorded hop, no credential-bearing material appeared in any header or cookie. **[M]** The engineer never typed the shared password, because it was never sent to their browser.
+The question is simple: **how can the engineer use the switch without its shared password entering that recording?**
 
-The path has three parts:
+Claims marked **[M]** were measured on the running system, **[V]** read from source, **[D]** taken from vendor documentation, **[A]** are design arguments we have not tested, and **[U]** are open. The [appendix](appendix.html) explains the complete scale and what remains unresolved.
 
-- The gateway authenticates the operator and sends **only a short-lived identity assertion** across the inspecting boundary.
-- A broker on the far side authorises **that person** with the secret store, fetches the device credential, and opens the native session there.
-- The operator gets back a short-lived **capability** bound to them and to one destination — never the credential, never the real target session.
-
-Claims marked **[M]** were measured on the running system, **[V]** read from source, **[D]** taken from vendor documentation, **[A]** are design arguments we have not tested, and **[U]** are open. The [appendix](appendix.html) explains the scale, the method behind the number above, and what is still unresolved.
-
-## The problem is an asymmetry, not a leak
+## Why is a recorded password worse than a recorded short-lived token?
 
 Three facts, each individually reasonable:
 
@@ -33,15 +27,28 @@ What makes this worse than ordinary "secrets in transit" is what a password does
 
 |  | A short-lived token | A password |
 |----|----|----|
-| Lifetime in a recording | useless within minutes | valid until someone rotates it |
+| Lifetime in a recording | usable until it expires, then historical | valid until someone rotates it |
 | Tied to a person | yes | no — shared |
 | Revocable | expires by itself | only by changing it everywhere |
 
-A recorded token is a historical artefact. A recorded password is a door that is still open, and stays open until somebody notices and changes it everywhere it is used. For a shared credential on a device with no inventory of who holds it, that is a project, not a task.
+A recorded short-lived token becomes a historical artefact when it expires. A recorded password is a door that stays open until somebody notices and changes it everywhere it is used. For a shared credential on a device with no inventory of who holds it, that is a project, not a task.
 
 Everything below follows from that one asymmetry.
 
-## Four answers that do not work
+## The solution in one paragraph
+
+Put a credential broker on the switch side of the inspecting boundary. The gateway authenticates the engineer and sends the broker only a short-lived, signed statement of the engineer's identity. The broker asks the secret store whether that person may use this switch. If authorised, it obtains the shared password and uses it there, on the switch side. The password is never returned to the engineer and never crosses the inspecting boundary.
+
+Four different security artefacts appear in the design. Keeping them distinct makes the rest of the paper easier to follow:
+
+| Item | What it does | Where it may travel |
+|----|----|----|
+| **Identity assertion** | short-lived, signed proof of who the engineer is | may cross the inspecting boundary |
+| **Appliance password** | logs into the appliance; shared and long-lived | remains in the credential zone |
+| **Appliance session token** | continues the real authenticated appliance session | remains with the broker |
+| **Broker capability** | short-lived handle allowing one engineer to use that broker-held session | may return to that engineer |
+
+## Why do the obvious alternatives fail?
 
 **Give the operator the password.** Nobody knows who did anything — the device logs a shared account — and revoking one engineer means rotating a credential everything else depends on.
 
@@ -51,7 +58,7 @@ Everything below follows from that one asymmetry.
 
 **Use a jump host.** Better for attribution. The password still lives somewhere a person can reach, and still crosses to the device.
 
-## The shape
+## How does identity cross without the password crossing?
 
 Split the path at the boundary.
 
@@ -127,9 +134,11 @@ sequenceDiagram
 
 The broker re-verifies the assertion and its capability binding on every request (step 14), not once at login.
 
-## Most devices are the same device
+## Which appliance authentication methods fit this pattern?
 
-The apparent variety in managed equipment collapses once you ask the right question: **what do you get back when you authenticate?**
+Before onboarding an appliance, ask what happens after the password is submitted. Does the appliance return a separate session token? Does it keep authentication tied to one network connection? Or must the password itself accompany later requests? Those answers determine whether sessions can be shared safely and whether this pattern applies at all.
+
+The labels below are shorthand used by the rest of the paper:
 
 | Class | Exchange | What you get | Broker behaviour |
 |----|----|----|----|
@@ -139,7 +148,7 @@ The apparent variety in managed equipment collapses once you ask the right quest
 | **B-conn** | none | authentication binds to the **connection** | dedicated connection per caller |
 | **C** | n/a | not HTTP — SNMP, SSH | outside this pattern entirely |
 
-Most managed HTTP estate is A1, and it is remarkably uniform: **[D]**
+The vendor examples we evaluated all provide a login exchange and a separate session credential, although their default lifetimes differ: **[D]**
 
 | Platform | Exchange | Session credential |
 |----|----|----|
@@ -148,23 +157,27 @@ Most managed HTTP estate is A1, and it is remarkably uniform: **[D]**
 | F5 BIG-IP | `POST /mgmt/shared/authn/login` | token → `X-F5-Auth-Token` |
 | Our target | `PATCH /api/system/login` | session token, target-supplied TTL **[M]** |
 
-Four vendors, one shape. Per-target knowledge reduces to five parameters:
+Four vendors, one recurring integration problem. For each appliance type, the broker needs five pieces of information:
 
-    login path · request shape · where the session credential goes · TTL · refresh
+1.  The login URL.
+2.  The format of the login request.
+3.  The field containing the resulting session token.
+4.  The field reporting how long that session remains valid.
+5.  The URL used to refresh it.
 
-That is why this generalises: onboarding is configuration, not an integration project. All five are configuration in the reference implementation. **[V]**
+All five are configuration in the reference implementation. **[V]**
 
-### The fifth parameter is the interesting one
+### How can new login formats be added without running contributed code beside the password?
 
-The other four are strings. The request shape is a structure, and the temptation is to hardcode it — at which point the claim above is quietly untrue, because a target that spells its login body differently now needs a code change.
+The login-request format is the difficult parameter. Hardcoding it means an appliance that spells its login body differently requires a broker code change. Writing a target-specific plugin solves that scaling problem but creates a security problem: the plugin would execute beside the plaintext password and would need network access to do its job.
 
-The obvious fix is to let each team contribute an adapter: a small piece of code that knows how its appliance likes to be asked. Two versions of that idea fail, and the way they fail is what makes the third defensible.
+The obvious fix is to let each team contribute an adapter: a small piece of code that knows how its appliance likes to be asked. Two versions are possible, but both leave a larger review surface than the restricted description used here.
 
-The first runs the adapter in a sandbox with no network access. This cannot work, and the reason is almost funny: the adapter's whole job is to talk to the appliance, so it needs an authorised outbound channel by construction. You cannot sandbox away the one capability you are required to grant. The adapter runs in the same process as a plaintext credential and is permitted to make network calls — the exfiltration path *is* the feature.
+The first runs the adapter in a sandbox and lets it perform the login. That adapter necessarily receives the plaintext credential and an authorised path to the appliance, so the platform must treat contributed code as part of the credential-handling trusted base. Sandboxing can narrow its environment; it cannot make that code credential-blind while the code itself performs the login.
 
-The second gives the adapter an opaque handle instead of the credential, and has the platform substitute the real value wherever the adapter placed the handle. This is closer, but circular: to know where to substitute, the platform must understand the structure the adapter produced, and if it understands the structure, the adapter is not contributing anything the platform could not have done itself.
+The second keeps the adapter credential-blind: it constructs a request containing an opaque sentinel, and platform-owned transport substitutes the credential before sending. That can be made safe, but it still runs contributed code to produce what is ultimately structured request data. For the JSON login formats evaluated here, executable code adds flexibility the use case does not need and expands what reviewers must reason about.
 
-What survives is inverting the direction. A team does not contribute code that *performs* the login; it contributes a description of what the login looks like:
+What survives is inverting the direction. A team does not contribute code that *performs* the login; it contributes a restricted template describing what the login request looks like. This paper calls that template a **login ceremony**:
 
 {% raw %}
 ```
@@ -175,7 +188,7 @@ What survives is inverting the direction. A team does not contribute code that *
 ```
 {% endraw %}
 
-Those are the reference appliance, F5 BIG-IP, and FortiManager. **[D]** The third is the awkward one — the credential nested inside a JSON-RPC envelope under a different pair of key names — and it is the case a hardcoded flat body cannot express at all. All three reach a working login by configuration alone, each covered by a test that renders it and asserts the credential lands in the right place. **[V]**
+Those are the reference appliance, F5 BIG-IP, and FortiManager. **[D]** The third is the awkward one — the credential nested inside a JSON-RPC envelope under a different pair of key names — and it is the case a hardcoded flat body cannot express at all. Tests render all three and assert that the credential lands in the documented position. **[V]** The complete login flow was exercised against the reference appliance; the F5 and FortiManager claims establish expressibility from their documented request shapes, not live vendor interoperability.
 
 The security property comes from who does what. The contributor supplies the shape. The broker supplies the credential, renders the template, and owns the destination — which it builds from its own configured upstream, not from anything in the ceremony.
 
@@ -199,11 +212,9 @@ A challenge-response handshake is the real boundary. There the credential is not
 
 **Class C is outside the pattern.** SNMP and SSH are not HTTP and generally cannot traverse an HTTPS-only inspected boundary. No broker design here solves it; the options are relocating that tooling inside the zone, or building a purpose-built API. Targets authenticating by TLS client certificate are excluded too — the classifying question is not answerable above HTTP.
 
-## A browser admin UI cannot be served by header injection
+## Why do browser-based administration pages need different handling?
 
-This looked like an implementation detail and turned out to be a boundary on what is possible.
-
-A single-page application decides whether it is logged in by reading **its own browser storage**. That check happens inside the operator's browser, before any request exists. An injected header is invisible to it, so the SPA concludes it is logged out and shows a login form — asking the operator to type the very credential you are concealing. **[M]**
+A command-line client can attach an authorization token to each request. A browser application may behave differently: its own JavaScript checks cookies or browser storage to decide whether login has happened. That check happens before the browser sends an authenticated request. A header added later by a proxy is invisible to it, so the page concludes it is logged out and asks the engineer to type the very password the broker is meant to conceal. **[M]**
 
 So the broker cannot inject. It has to *answer* the login: hold an authenticated upstream session, reply to the login request with the target's own response body but with the session token replaced by an opaque synthetic one, then swap it back on every subsequent request.
 
@@ -247,16 +258,16 @@ sequenceDiagram
 
 Steps 7 through 11 are the substitution: the broker discards what the browser submitted, performs its own login, and replaces the appliance's token before replying. Machine callers need none of this. Browser callers cannot work without it. That is a line between two kinds of broker, not a wrinkle in one.
 
-## What you are actually signing up for
+## What operational burden does the broker create?
 
 Read the diagram again and notice what it commits you to. The browser holds a token that means nothing to the appliance, so **every subsequent request has to pass through the component holding the mapping**. The broker is not a login-time helper you call once and step out of the way. It is on the request path for the life of the session, and for every session.
 
-That makes it four things, not one:
+That makes the broker four things, not one:
 
 - a **reverse proxy**, forwarding requests
 - a **request terminator**, answering the login itself instead of forwarding it
 - a **response rewriter**, parsing the appliance's own body and substituting a field
-- a **stateful adapter**, holding the synthetic-to-real mapping per subject, plus a long-lived upstream session independent of any caller
+- a **stateful session mapper**, holding the browser-token-to-appliance-token mapping per person, plus an upstream session independent of any one browser request
 
 A gateway gives you the first. The other three are code you write, and they are where the difficulty actually sits — which is why [the evaluation](gateway-evaluation.html) concludes this is not a gateway-shaped problem.
 
@@ -270,13 +281,13 @@ Three consequences follow, and they are the real cost of the pattern:
 
 None of that argues against the pattern. It argues for one team building it and others onboarding by configuration, rather than each team writing its own — which is the recommendation in the [appendix](appendix.html).
 
-## Where the vault sits matters as much as where the broker sits
+## Where must the broker and secret store be placed?
 
 Moving the broker to the far side feels like the whole job. It is not. If the broker then reaches back across the boundary to fetch the credential, the secret crosses in the other direction and the recording problem returns unchanged.
 
-The vault must be reachable from the broker without traversing the boundary.
+The secret store must be reachable from the broker without traversing the boundary. “Vault” and “secret store” refer to the same role in this paper.
 
-## Name the zones for the rule they enforce
+## How does the reference deployment enforce those zones?
 
 | Zone | Contains | Rule |
 |----|----|----|
@@ -383,9 +394,9 @@ The appliance password is a transient local value on the login path, not a store
 
 "It authorises as the caller" limits the damage only if the secret store enforces exact-path grants independently *and* the delegation is not a replayable bearer token. Our implementation does not meet the second condition: it forwards the caller's assertion to the store as a bearer token, so anything that can read it can replay it for that token's remaining life. Sender-constrained delegation would close that. **[V]**
 
-## What measurement found that review did not
+## What did the boundary audit find that architecture review missed?
 
-Two defects were live in a working, reviewed implementation of this pattern. Both are invisible to architecture review. Both were found by putting an observer on the boundary hop.
+Two defects were live in a working, reviewed implementation of this pattern. Both were invisible to architecture review. Both were found by recording every header and cookie crossing the inspected network segment.
 
 **The gateway's own session cookie was crossing on every request observed at the time.** **[U]** The broker fronted its targets on its own origin, so the browser attached the gateway's session cookie to every request and the proxy forwarded it verbatim. Nothing downstream read it. It was an unbound 24-hour bearer for the gateway itself — and the gateway could reach targets whose credentials resolve on the trusted side.
 
@@ -401,7 +412,12 @@ That second number matters. "The target's five cookies were preserved" would hav
 
 Attribute from the verified token, and suppress those headers wherever a signed token is present.
 
-Two rules came out of that work, and they generalise:
+Two testing lessons came out of that work. Here are the terms before the lessons:
+
+- A **watchlist** checks only a predetermined set of header or cookie names.
+- A **full census** records every header and cookie name, then classifies what it found.
+- A **stub** is a test substitute for the real downstream service.
+- A **response-side signal** is proof that the request reached the intended downstream service and returned through the complete path.
 
 > **A watchlist proves presence, never absence.** Instrumentation watching five named headers can tell you those five were absent. It says nothing about the sixth — which is exactly the claim being made. Only a full census answers it.
 
@@ -409,14 +425,14 @@ Two rules came out of that work, and they generalise:
 
 We learned both the hard way. A five-header watchlist reported a clean boundary while a full census found an unwatched header on every request, and a re-applied manifest silently repointed the monitor at a stub while the observations went on looking correct. **[M]** The rules that follow from those two incidents are inference, not measurement. **[A]**
 
-## Onboarding a target
+## How do you add a new appliance safely?
 
-1.  Classify it. If Class C, stop — this does not cover it.
-2.  For A2 candidates, read the session lifetime off a real device.
-3.  Capture the five parameters: login path, request shape, credential location, TTL, refresh. The request shape is written as a ceremony; `reference/README.md` documents the grammar and gives the shapes for three real targets.
-4.  Decide whether callers are machines or browsers. Browsers need login interception.
-5.  Create the grant: subject set, destination, capability TTL.
-6.  Run the conformance test against the new path, with a response-side signal.
+1.  Classify its authentication behavior using the table above. If it is Class C, stop — this pattern does not cover it.
+2.  If it returns a session that may be long-lived (Class A2), read the actual lifetime from a real appliance rather than trusting a default.
+3.  Record the five configuration values: login URL, login-request format, session-token field, session-lifetime field, and refresh URL. The login-request format is the ceremony; `reference/README.md` documents its grammar and gives three complete examples.
+4.  Decide whether the client is a machine or a browser. Browser applications need the login-response translation described above.
+5.  Create an **access grant**: which people may use the appliance, which destination they may reach, and how long their broker capability lasts. This is different from the refresh credential discussed in the renewal section.
+6.  Run the conformance test against the new path. Require both a full boundary census and a successful response from the intended downstream service.
 
 Effort scales with distinct target *types*, not target count. The fifth device of a type you support is configuration; the first device of a new type is integration. Most estates have five to fifteen distinct types. **[A]**
 

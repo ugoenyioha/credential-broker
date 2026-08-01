@@ -9,11 +9,33 @@ An engineer needs to change a firewall rule. The firewall knows one way to authe
 
 Somewhere in that arrangement, a password crosses a recorder.
 
-> A recording of a token is an artefact. A recording of a **password** is an unexpired key, held indefinitely, by anyone who can read the archive.
+> A recording of a short-lived token becomes an artefact when the token expires. A recording of a **password** remains a key until somebody rotates it.
 
-That asymmetry is the whole problem. A token in a capture is a record of something that happened. A password in a capture is a door that is still open.
+That asymmetry is the whole problem. A captured short-lived token may remain useful until it expires. A captured shared password remains useful until somebody rotates it, potentially long after the original session.
 
-## The pattern, working
+The question is simple: **how can the engineer use the appliance without its shared password crossing — or being stored by — the inspecting device?**
+
+## The solution, in plain terms
+
+Put a credential broker on the appliance side of the inspecting boundary.
+
+1.  The engineer signs in through the company's normal single sign-on.
+2.  The access gateway — the service in front of the appliance — sends the broker a short-lived, signed statement saying who the engineer is.
+3.  The broker asks the secret store whether that engineer is allowed to use this appliance.
+4.  If the answer is yes, the broker obtains the shared appliance password and uses it there, on the appliance side of the boundary.
+5.  The password is never sent to the engineer and never crosses the inspecting boundary.
+
+The secret store authorises **the person, not merely the broker service**. That distinction preserves attribution: the access record says which engineer requested the appliance, not just which server made the network call.
+
+Three network zones make the rule visible:
+
+- **Identity zone:** authenticates the engineer.
+- **Monitor zone:** decrypts, inspects, and records traffic.
+- **Credential zone:** contains the broker, access to the secret store, and the appliance-side use of the password.
+
+The central rule is now easy to state: the shared appliance password must never appear in the identity or monitor zone.
+
+## What the engineer experiences
 
 <video controls muted playsinline preload="metadata" width="100%"
        style="max-width:900px;border:1px solid #eaecef;border-radius:6px;">
@@ -22,85 +44,122 @@ That asymmetry is the whole problem. A token in a capture is a record of somethi
   <a href="demo.mp4">Download the recording</a> instead.
 </video>
 
-An operator signs in with single sign-on, selects the appliance, and reaches its administrative interface — **without ever being sent, or typing, the appliance's password.** The broker exchanged the operator's identity for that credential on the far side of the boundary and used it there.
+The engineer signs in with single sign-on, selects the appliance, and reaches its administrative interface — **without ever receiving or typing the appliance password.** The broker completed the appliance login on the other side of the boundary.
 
-The appliance's own login form never appears, because the broker answered it. The operator's display name and the device's serial, MAC and address are blurred; nothing else is edited.
+The appliance's own login form never appears. The engineer's display name and the device's serial number, MAC address, and network address are blurred in the recording; nothing else is edited.
 
-## Read
+## How a browser session works
 
-- **[The pattern](credential-broker-pattern.html)** — the problem, the design, how to build it, and how to prove it. Includes an explicit account of where it does not help.
-- **[Gateway evaluation](gateway-evaluation.html)** — Kong and Apigee assessed against the requirements a working implementation actually produced.
-- **[Appendix](appendix.html)** — the conformance test, the residual risks, how the claims are marked, and what is still open.
+The appliance does not understand the engineer's company identity. It understands only its own login request and the session token it returns after a successful login.
 
-## The shape of the answer
+The broker bridges those two systems:
 
-Split the path at the boundary. The gateway authenticates the person and forwards **only their identity**. On the far side, a broker exchanges that identity for the device's credential and uses it there. The credential is never sent back.
+1.  It verifies the engineer's signed identity on every request.
+2.  It obtains the appliance password only after the secret store authorises that engineer.
+3.  It sends the appliance's normal login request from inside the credential zone.
+4.  It keeps the appliance's real session token and gives the browser a new, short-lived opaque token instead.
+5.  On later requests, it replaces the browser's opaque token with the real appliance session token before forwarding the request.
 
-Two rules carry the design:
+The opaque browser token is useful only through this broker, for this engineer and this appliance. Possessing it does not reveal the password or the appliance's real session token.
 
-1.  Only expiring, bound, scoped material crosses the boundary. An assertion may cross; a credential may not.
-2.  The secret store authorises **the operator, not the broker's workload identity.**
+This extra step is necessary for browser-based administration pages. Adding an `Authorization` header to proxied requests is not enough: the page's own JavaScript often checks browser storage before making a request. If it finds no login state there, it displays the appliance login form and asks the engineer for the password. The broker avoids that prompt by completing the appliance login and answering the browser with the appliance's expected response shape.
 
-The second is what makes access attributable. A vault that authenticates the workload knows a machine asked. A vault that authenticates the person knows who asked.
+## Adding another appliance without writing broker code
 
-Three zones, named for the rule each enforces — **identity**, **monitor**, **credential**. Named that way, a credential appearing in the identity zone is self-evidently a violation. The monitor zone is named deliberately: it is the reason the pattern exists. (The pattern explains why "high side / low side" was rejected — the canonical usage would place the appliance credential in the zone called *low*.)
+Different appliance types expect different login requests. One may accept `user` and `password`; another may expect `username`, `password`, and a provider name; a third may nest both values inside a JSON-RPC message.
 
-## Onboarding a target, without writing code
+The obvious implementation is to write a new login adapter for every appliance type. That scales poorly, and it creates a security problem: each adapter would run as code beside the plaintext password and would need network access to do its job. A faulty or malicious adapter would therefore have everything it needs to send that password elsewhere.
 
-A broker is only worth building if the second target is cheaper than the first. Per-target knowledge here reduces to five parameters — the login path, the shape of the login request, where the session credential lives in the response, its TTL, and how to refresh it — and all five are configuration.
+The broker uses configuration instead. For each appliance type it needs five protocol values:
 
-The fourth and fifth are the interesting ones. The *shape* is contributed as a **ceremony**: a description of the login body, not code that performs the login.
+1.  The login URL.
+2.  The format of the login request.
+3.  The field in the response that contains the appliance session token.
+4.  The field that says how long the session remains valid.
+5.  The URL used to refresh the session.
+
+Onboarding also requires an **access policy**. The secret store decides which engineers may obtain the appliance password; the broker binds the resulting access to one destination and a short lifetime. The five protocol values describe how the appliance login works. The access policy describes who may use it and under what limits.
+
+The login-request format is a restricted template called a **login ceremony**. It describes the request body; it is not code that performs the login.
+
+For the appliance used to test this reference implementation, the ceremony is:
 
 {% raw %}
-```
+```json
 {"user":"{{.User}}","password":"{{.Password}}"}
+```
+{% endraw %}
+
+The broker inserts the configured username and the password obtained from the secret store. The template may contain literal text plus those two substitutions only, and the password must appear exactly once. It cannot run functions, make network calls, duplicate the password, or choose where the request is sent. The broker owns the destination.
+
+The same mechanism also expresses more involved vendor formats:
+
+{% raw %}
+```json
 {"username":"{{.User}}","password":"{{.Password}}","loginProviderName":"tmos"}
+
 {"id":1,"method":"exec","params":[{"url":"/sys/login/user",
   "data":{"user":"{{.User}}","passwd":"{{.Password}}"}}]}
 ```
 {% endraw %}
 
-Those are the reference appliance, F5 BIG-IP, and FortiManager — the last nesting the credential inside a JSON-RPC envelope under different key names again. **[D]** All three reach a working login by configuration alone. **[V]**
+Those are the documented shapes for F5 BIG-IP and FortiManager. The second nests the values inside a JSON-RPC request. Tests confirm that both documented request shapes can be rendered through configuration alone. The complete login flow was exercised against the appliance used by the reference deployment.
 
-The tempting alternative is to let each team contribute an *adapter*: code that knows how its appliance likes to be asked. That fails, and instructively. Such an adapter runs in-process while the broker holds a plaintext credential, and its job is to talk to the appliance — so it needs an authorised outbound channel by construction. You cannot sandbox away the one capability you are required to grant.
+## What we validated for security
 
-A ceremony inverts it. The contributor supplies the shape; the broker supplies the credential, renders the template, and owns the destination. The grammar admits only literal text and the two substitutions, with the credential permitted **exactly once**, so a contributed ceremony cannot duplicate it and has no field with which to name a destination. **[V]** The danger was never tenant contribution — it was running tenant *code* beside a plaintext credential. A description cannot exfiltrate, because a description does not execute.
+The security goal is narrower and more useful than “the system looks healthy”:
 
-## Why this is not header injection
+> Across the inspected boundary, the permitted security material is short-lived and individually bound: the signed identity statement and the broker's opaque browser token. The shared appliance password, the appliance's real session token, and the access gateway's login cookie — the cookie that keeps the engineer signed into the gateway itself — must not appear there.
 
-The obvious implementation injects an `Authorization` header into a proxied request. For **browser-facing** targets that cannot work, and the reason is structural:
+We tested that goal in four ways.
 
-> A single-page admin UI decides whether it is logged in by reading **its own browser storage**. That check happens before any request exists, so an injected header is invisible to it and the operator is shown a login form — asking them to type the very credential you are concealing.
+### 1. We recorded everything crossing the boundary
 
-So the broker *answers* the login instead, replacing the token in the appliance's own response with an opaque synthetic one and swapping it back on every subsequent request. Machine callers need none of this; browser callers cannot work without it.
+The audit recorded every header and cookie name, rather than checking only a predetermined list. A predetermined list can confirm that the names on the list were absent; it cannot detect a sensitive value under a name nobody thought to list.
 
-## How to read the claims
+On the measured deployment, prohibited credential material appears in headers or cookies on **0 of 469 consecutive requests**. The permitted identity statement, opaque broker token, and appliance's ordinary preference and UI-state cookies continue to pass as expected.
 
-Every claim carries a marker saying how it is known, on one ordered scale: **[M]** measured, **[V]** verified from source, **[G]** verified from the GitHub API, **[D]** vendor documentation, **[C]** community or practitioner example, **[A]** reasoned but unverified, **[U]** open question. The full table is in [the appendix](appendix.html#how-the-claims-are-marked). Where a control was not proven, it says so.
+Request-body contents were not recorded, so the boundary audit alone does not prove that a password never appears in a body. That part of the claim has separate evidence: source tests show that the password is inserted only into the platform-owned login request, the broker refuses redirects and owns the destination, and the end-to-end test confirms that this request reaches the intended appliance and produces a working session.
 
-## On API gateways
+The audit also requires a successful response from the far side. Without that response, a disconnected broker or a temporary test replacement for the real service could make the observed boundary look perfectly clean simply because the request never completed the intended path.
 
-Both Kong and Apigee were assessed against the requirements the implementation produced, not against the pattern in the abstract. The short version: the difficulty sits in answering a login, rewriting a response, and holding synthetic-token state — and neither product provides any of that. Both can host it.
+### 2. We tried to impersonate another engineer
 
-They fail differently. Kong's secret subsystem has no caller dimension at all — its cache key is `config_hash + reference`, resolved on a background timer **[V]** — so it can resolve *a* credential but never *this caller's*. Apigee appears able to express the exchange declaratively **[D]/[C]**, on documentation and practitioner evidence rather than a proof of concept; its runtime also depends on a vendor control plane the credential zone would have to egress to, and whether it can run with that plane unreachable is an open question. The evaluation is explicit about which claims rest on which kind of source.
+A forged identity statement had the right shape, victim identity, issuer, audience, expiry, and published signing-key identifier — but not a valid signature. The broker rejected it with `signature does not verify`.
 
-## What was measured
+This test matters because checking identity only at login is insufficient. The broker verifies the signed identity again on every use of the browser's opaque token.
 
-- A gateway session cookie was crossing the boundary on every request observed — carrying, on that hop, something more valuable than the secret the design existed to protect. On the current deployment it crosses on **0 of 469** consecutive requests, while the target's own cookies pass through as presented. **[M]** The pre-fix figure is reported from a deployment that no longer exists and cannot be re-derived. **[U]**
-- A full header census found an unsigned identity header on every request observed. **[U]** The receiving service authorised on the signed token but attributed its audit log to the unsigned one.
-- A forged assertion — correct shape, victim subject, future expiry, correct issuer and audience, and the real published key id — is rejected with `signature does not verify`, once signature checking is applied on **every** use rather than at login only. **[V]** That defect was found by reading the authorisation path rather than by measuring the boundary; the two activities catch different things.
-- The reference implementation followed HTTP redirects on the request that carries the appliance password, so a redirect from the login endpoint replayed that password to the redirect target. **[M]** Demonstrated, then fixed, with a regression test asserting the redirect target receives nothing.
+### 3. We tested whether the password could be redirected
 
-## Two rules worth stealing
+The first implementation followed HTTP redirects on the login request that carries the appliance password. A `307` or `308` response could therefore replay the same method and body to another server.
 
-**A watchlist proves presence, never absence.** Instrumentation that watches five named headers can tell you those five were absent. It can say nothing about the sixth — which is exactly the claim being made. **[M]**
+The broker now refuses redirects on every request that can carry a credential. A regression test confirms that the redirect destination receives nothing.
 
-**Boundary observations are recorded before forwarding.** They look healthy even when the downstream has been replaced by a stub. Header evidence can prove a leak; it cannot prove a chain works. **[M]**
+### 4. We proved the clean boundary belonged to a working end-to-end path
 
-## Status
+The running deployment was exercised end to end: single sign-on, authorization by the secret store, the declarative login ceremony against the real appliance, creation of a five-minute appliance session, and issuance of a separate short-lived browser token. This prevents a disconnected broker or test replacement from producing a deceptively clean boundary simply because the intended request path never ran.
 
-A reference implementation, not a product.
+## How claims are labelled
 
-The broker verifies the caller's assertion on every request and refuses to start in per-user mode without a key set and issuer — but that is defence in depth, not a licence to expose it. It must still sit behind the gateway, enforced by NetworkPolicy. One upstream appliance session is shared across operators. SNMP and SSH-only targets are out of scope; no design here solves them.
+The detailed documents label each claim by how it is known: **[M]** measured, **[V]** verified from source, **[G]** verified through the GitHub API, **[D]** vendor documentation, **[C]** community or practitioner evidence, **[A]** reasoned but unverified, and **[U]** open question. The [appendix](appendix.html#how-the-claims-are-marked) contains the complete definitions.
+
+The overview omits most markers so the explanation remains readable. The detailed pattern and appendix retain them at claim level.
+
+## Limits
+
+This is a reference implementation, not a product.
+
+- The broker must remain behind the gateway and in the credential zone, enforced by network policy.
+- One real appliance session is shared across engineers. The broker preserves per-person authorization and audit at its own layer, but the appliance may see the shared account.
+- The implemented ceremony format describes JSON login bodies. Form and XML bodies need different escaping; challenge-response schemes require first-party broker code or must remain out of scope.
+- SNMP, SSH-only targets, and other non-HTTP protocols are outside this pattern.
+- The boundary audit covers header and cookie contents, plus body sizes; it does not inspect request-body contents.
+
+## Further reading
+
+- **[The detailed pattern](credential-broker-pattern.html)** — design reasoning, implementation requirements, and the full evidence record.
+- **[Reference implementation]({{ site.github.repository_url }}/tree/main/reference)** — broker source, ceremony grammar and tests, and a deployable example with all five appliance parameters set explicitly.
+- **[Gateway evaluation](gateway-evaluation.html)** — whether Kong or Apigee can provide the required behavior. Both can host a broker; neither supplies the difficult parts itself.
+- **[Appendix](appendix.html)** — conformance method, residual risks, claim markers, operations, and open questions.
 
 Identifiers throughout are documentation placeholders (`example.internal`, RFC 5737 addresses). Nothing here is a live endpoint.
