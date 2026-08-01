@@ -57,8 +57,16 @@ HTML
   && echo "  rendered $2" || echo "  FAILED $2"
 }
 
+strip_title() { python3 - "$1" <<'S'
+import re, sys, pathlib
+p = pathlib.Path(sys.argv[1]); t = p.read_text()
+p.write_text(re.sub(r'<h1 class="title">.*?</h1>\s*', '', t, flags=re.S))
+S
+}
+
 render index.md                     index.html                     "Overview"
 render credential-broker-pattern.md credential-broker-pattern.html "The Credential Broker Pattern"
 render gateway-evaluation.md        gateway-evaluation.html        "Gateway evaluation"
+for h in "$OUT"/*.html; do strip_title "$h"; done
 rm -f "$OUT/.tmp.md"
 echo "  open: file://$(pwd)/$OUT/index.html"

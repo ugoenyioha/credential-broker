@@ -23,11 +23,17 @@
 // reaches the browser. The browser holds a handle that is meaningless anywhere
 // else and is revoked by restarting or logging out.
 //
-// # DELIBERATELY NO AUTHENTICATION OF ITS OWN
+// # IT VERIFIES THE CALLER, BUT IT IS NOT THE ONLY GATE
 //
-// This service must only ever be reachable from the broker in front of it
-// (Warpgate), which performs OIDC login, authorisation and session recording.
-// Enforce that with a NetworkPolicy. It is not safe to expose directly.
+// This service cryptographically verifies the forwarded user token on every
+// request -- signature, issuer, audience, expiry -- and refuses to start in
+// per-user mode without the key set and issuer configured. See verify.go for why
+// checking shape alone was a reachable defect rather than a theoretical one.
+//
+// It still must only ever be reachable from the gateway in front of it, which
+// performs the interactive login and session recording. Verification here is
+// defence in depth, not a licence to expose this service directly.
+// Enforce that with a NetworkPolicy.
 package main
 
 import (

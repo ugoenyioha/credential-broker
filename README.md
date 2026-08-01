@@ -5,8 +5,9 @@ per-user access to a device whose credential cannot be per-user — across a
 boundary where everything that crosses is recorded.
 
 The paper is in [`docs/credential-broker-pattern.md`](docs/credential-broker-pattern.md).
-Everything here was built, deployed, and measured against a real network
-appliance rather than reasoned about on paper.
+It was built and deployed against a real network appliance, and the boundary
+property was measured rather than asserted. Claims carry markers; where a control
+was not proven, it says so.
 
 ---
 
@@ -38,18 +39,17 @@ Two rules do most of the work:
 
 1. **Only expiring, bound, scoped material crosses the boundary.** An assertion
    may cross; a credential may not.
-2. **The credential zone authorises the operator, not the pod.** The broker
+2. **The secret store authorises the operator, not the broker's workload identity.** The broker
    presents the caller's token to the secret store, so the vault sees the person.
 
-The zones are named for the rule they enforce — `identity-zone` and
-`credential-zone` — rather than for a trust level. A credential appearing in the
+The zones are named for the rule they enforce — `identity-zone`, `monitor-zone` and `credential-zone` — rather than for a trust level. A credential appearing in the
 identity zone is self-evidently a violation, with no convention to remember.
-(§1 of the paper explains why "high/low" was considered and rejected.)
+(§10 of the paper explains why "high/low" was considered and rejected.)
 
 ## Why the broker is not a header injector
 
 The obvious implementation injects an `Authorization` header into a proxied
-request. That cannot work for the common case, and the reason is structural:
+request. For browser-facing targets that cannot work, and the reason is structural:
 
 > A single-page admin UI decides whether it is logged in by reading **its own
 > browser storage**. That check happens before any request exists, so an injected
@@ -97,9 +97,11 @@ Two habits are worth stealing regardless of whether you use this pattern:
 
 This is a reference implementation, not a product.
 
-- The broker has **no authentication of its own, deliberately.** It must be
-  reachable only from the gateway in front of it, enforced by NetworkPolicy. It
-  is not safe to expose directly.
+- The broker **verifies the caller's assertion on every request** — signature,
+  issuer, audience, expiry — and refuses to start in per-user mode without a key
+  set and issuer. That is defence in depth, not a licence to expose it: it must
+  still be reachable only from the gateway in front of it, enforced by
+  NetworkPolicy.
 - One upstream appliance session is shared across operators. Per-operator
   upstream sessions would be a materially harder build.
 - Class C targets (SNMP, SSH-only devices) are out of scope. No broker design

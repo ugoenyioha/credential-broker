@@ -9,18 +9,14 @@ Supersedes `kong-evaluation.md` and `apigee-evaluation.md`, both of which evalua
 a simpler problem than the one that actually exists. Evaluation only — no
 implementation.
 
-## Why this was rewritten
+## What this measures against
 
-The earlier documents asked "can a gateway inject a per-user credential into an
-upstream request?" That is not the requirement. The working prototype does not
-inject a header, and the reason it cannot is structural rather than incidental.
-The requirement set in §2 is derived from the shipped code, not from a
-conceptualisation of it — and against that set, both products score very
-differently.
-
-A log of the wrong turns is kept in §9 rather than being quietly removed, because
-two of them were reversals that would have produced a confident wrong
-recommendation.
+The obvious question — *can a gateway inject a per-user credential into an upstream
+request?* — is the wrong one. For browser-facing targets the broker cannot inject a header
+at all, for structural reasons — set out in §2 below, and in §9 of the pattern. The requirement set below is derived from a
+working implementation rather than from the pattern in the abstract, and against that set
+the two products differ on R3 and on R12, and scarcely at all on R5–R9 — which is where
+the difficulty actually sits.
 
 ## Evidence markers
 
@@ -30,6 +26,8 @@ recommendation.
 | **[G]** | Verified from the GitHub API |
 | **[D]** | Vendor documentation (Apigee is closed-source; documentation is the ceiling) |
 | **[M]** | Measured in the deployed rig against the real appliance |
+| **[A]** | Reasoned but unverified — an architectural consequence, not an observation |
+| **[C]** | Community or practitioner example — weaker than vendor documentation |
 | **[U]** | Open question, stated as such |
 
 Kong's findings are source-verified. Apigee's cannot be, and are one confidence
@@ -41,7 +39,7 @@ lines of Lua that no documentation would have exposed.
 ## 1. The architecture the requirement sits in
 
 ```
-operator ──▶ PAM (high side)  ──▶ [inspecting boundary] ──▶ broker (low side) ──▶ appliance
+operator ──▶ PAM (identity zone) ──▶ [ monitor ] ──▶ broker (credential zone) ──▶ appliance
                  │                                              │
          OIDC login, session                          vault (must NOT be reached
          recording, forwards                           across the boundary)
@@ -50,21 +48,21 @@ operator ──▶ PAM (high side)  ──▶ [inspecting boundary] ──▶ br
 
 Two placement rules follow, and they are prior to any capability question.
 
-**Credential injection must happen below the boundary.** If PAM injects from the
-high side, the credential crosses the inspector. A recording of a credential is not
+**Credential injection must happen in the credential zone.** If PAM injects from the
+identity zone, the credential crosses the monitor. A recording of a credential is not
 a record of an event — it is an unexpired key held by whoever holds the recording.
 The appliance password does not expire; the recording outlives every control around
 it. Only expiring, bound, scoped material may cross.
 
-**The vault must not be reached across the boundary either.** Moving the broker
-low-side is defeated if its vault call drags the credential back across in the
-opposite direction. This is easy to miss because "the broker is now low-side" reads
-as sufficient. In the prototype the vault path does not traverse the monitor;
+**The vault must not be reached across the boundary either.** Moving the broker into
+the credential zone is defeated if its vault call drags the credential back across in
+the opposite direction. This is easy to miss because "the broker has moved" reads as
+sufficient. In the prototype the vault path does not traverse the monitor;
 a manifest exists (`45-monitor-egress-openbao.yaml`) that deliberately violates this
 as a labelled experiment variant, not as the baseline. **[V]**
 
 **Consequence for procurement:** a PAM product that performs credential injection
-from the high side is architecturally unusable here, regardless of the quality of
+from the identity zone is architecturally unusable here, regardless of the quality of
 its session recording. That is a hard filter, and an easy one to discover late,
 because injection is marketed as a capability rather than as a placement decision.
 
@@ -72,7 +70,7 @@ because injection is marketed as a capability rather than as a placement decisio
 
 ## 2. What is actually required
 
-Derived from `services/switch-portal/main.go` (1,184 lines) and the surrounding
+Derived from `reference/broker/main.go` (1,184 lines) and the surrounding
 deployment. **[V]**
 
 The prototype is a **reverse proxy** (`httputil.ReverseProxy`) — it does forward
@@ -99,15 +97,17 @@ Stated in the source, and general beyond this appliance:
 This is not "works poorly." For a single-page-application admin UI, header
 injection is structurally incapable of producing a logged-in session. The class of
 targets where a gateway's natural capability — header manipulation on a proxied
-request — actually applies is therefore **narrower than the pattern paper currently
-implies**, and §16's Class A should be qualified accordingly.
+request — actually applies is therefore **narrower than the Class A1 row in §8 of the
+pattern suggests on its own.** The pattern carries that qualification in §9, not in the
+classification table: a reader who classifies from §8 alone will over-estimate what a transparent
+proxy can serve.
 
 ### The requirement set
 
 | # | Requirement | Source |
 |---|---|---|
-| R1 | Run **below** the inspecting boundary, no credential above it | architecture |
-| R2 | Verify the caller's assertion on **every use** — signature, `iss`, `aud`, `exp`, `nbf`, algorithm **pinned**, fail closed | **[V]** `verify.go` |
+| R1 | Run in the **credential zone**; no credential in the identity or monitor zones | architecture |
+| R2 | Verify the caller's assertion on **every use** — signature, issuer, audience, expiry; fail closed | **[V]** `verify.go` |
 | R3 | Authenticate to the vault **as the operator**, never as the pod or gateway | requirement |
 | R4 | Bound the capability by `min(capability_ttl, assertion_remaining)` | **[V]** `mintUntil` |
 | R5 | **Synthesize a response** to the SPA's login POST | **[V]** |
@@ -116,11 +116,13 @@ implies**, and §16's Class A should be qualified accordingly.
 | R8 | Bidirectional substitution on **every** subsequent request | **[V]** |
 | R9 | Maintain a long-lived upstream appliance session | **[V]** |
 | R10 | Telemetry distinguishing expiry from forgery | **[V]** |
-| R11 | No standing credential held above the boundary | architecture |
-| R12 | No vendor egress out of the low zone | environment |
+| R11 | No standing credential held in the identity or monitor zones | architecture |
+| R12 | No vendor egress out of the credential zone | environment |
 
-R5–R9 are the ones that decide this evaluation, and none of them appeared in the
-earlier documents.
+R5–R9 are the ones that decide this evaluation. The pattern states the mechanism (§9); what
+a working implementation adds is the weight of it. R5–R8 exist because the caller is a
+browser; R9 is driven by target concurrency limits rather than by the browser. Neither
+product supplies any of the five.
 
 ---
 
@@ -167,8 +169,8 @@ cached tokens**. **[D]**
 - OSS ships **one** vault backend: `env`. **[V]** No OpenBao integration exists in OSS.
 - There is **no `openid-connect` plugin in OSS**. **[V]**
 
-So R2 and R3 both require Enterprise, on a version line roughly five minors ahead
-of anything Apache-2.0.
+So R2 requires Enterprise, on a version line roughly five minors ahead of anything
+Apache-2.0 — and R3 is not reachable in either edition, for the structural reason above.
 
 ### Against R5–R9
 
@@ -193,9 +195,14 @@ a way that would not surface in testing.
 plugin lifecycle. R2–R9 are all custom code. R3 is impossible through Kong's own
 mechanisms and must be written around them.
 
-**Kong's one decisive advantage is R12:** it is fully self-hosted, needs no external
+One hypothesis worth killing explicitly, because it is plausible and wrong: running Kong
+in DB-less mode does **not** foreclose per-user state. The `session` plugin still stores it.
+Deployment mode is irrelevant to the binding constraint, which lives in the vault
+subsystem. **[V]**
+
+**Kong's clearest advantage is R12:** it is fully self-hosted, needs no external
 control plane, and in DB-less mode has no outbound dependency at all. It can live in
-a restricted zone with zero egress.
+a credential zone with zero egress.
 
 ---
 
@@ -203,7 +210,7 @@ a restricted zone with zero egress.
 
 ### Where it is genuinely better
 
-**R3 is satisfied declaratively.** Apigee does not attempt credential retrieval via
+**R3 appears satisfiable declaratively. [D]/[C]** Apigee does not attempt credential retrieval via
 a vault-reference mechanism; it exposes `ServiceCallout`, an arbitrary HTTP call
 mid-flow with access to the incoming request — including the caller's token: **[D]/[C]**
 
@@ -211,8 +218,8 @@ mid-flow with access to the incoming request — including the caller's token: *
 <Header name="Authorization">request.header.Authorization</Header>
 ```
 
-The vault sees the operator, not the gateway. This is the requirement Kong cannot
-meet, met without custom code.
+On this configuration the vault would see the operator, not the gateway — the requirement Kong cannot
+meet, and on this evidence met without custom code.
 
 **R2** is `VerifyJWT`/`OAuthV2`. **R4** is arithmetic over flow variables. **[D]**
 
@@ -243,7 +250,7 @@ and **if the broadcast fails the stale value remains in L1 cache until TTL expir
 
 ### Where it fails outright
 
-**R12.** Only Apigee hybrid is admissible for a restricted zone, and hybrid splits
+**R12.** Only Apigee hybrid is admissible for a credential zone, and hybrid splits
 into a Google-hosted management plane and a customer-managed runtime plane. **[D]**
 Traffic locality is correct — *"All API traffic passes through and is processed
 within the runtime plane"* **[D]** — but three flows cross outward:
@@ -258,9 +265,9 @@ within the runtime plane"* **[D]** — but three flows cross outward:
 On a boundary whose entire premise is controlling what leaves and who records it, an
 asynchronous egress channel to a vendor cloud is not an operational detail.
 
-### The debug-egress question — investigated, and answered
+### The debug-egress question
 
-This was flagged as the blocking question. It is now settled, and the answer is
+This was flagged as the blocking question. The documented answer is
 **"yes by default, preventable only by non-obvious configuration, with a trap
 specific to the exact mechanism the broker uses."** **[D]**
 
@@ -274,7 +281,7 @@ data and cache it internally, before transmitting that data to the control plane
 the Cloud."* **[D]** *"Debug data is persisted in the management plane for up to 24
 hours."* **[D]** *"Apigee Support has read-only permission to Debug data."* **[D]**
 
-So a credential captured in a debug session leaves the restricted zone, lands in
+So a credential captured in a debug session leaves the credential zone, lands in
 Google's control plane, persists 24 hours, and is readable by vendor support staff.
 
 **The mitigation is real.** Masking happens *before* egress: *"Apigee performs the
@@ -326,7 +333,7 @@ to"* analytics, which is at minimum a second channel needing its own answer. **[
 
 ### Verdict
 
-**Strong on R3, equal to Kong on R5–R9, disqualified on R12** unless the egress
+**Apparently strong on R3, equal to Kong on R5–R9, disqualified on R12** unless the egress
 question resolves favourably and the zone can tolerate a vendor control-plane
 dependency.
 
@@ -336,9 +343,9 @@ dependency.
 
 | | Kong | Apigee | Prototype |
 |---|---|---|---|
-| R1 low-side placement | yes | runtime yes, control plane no | yes |
+| R1 credential-zone placement | yes | runtime yes, control plane no | yes |
 | R2 verify every use | EE plugin | native | **[V]** yes, alg pinned, fails closed |
-| **R3 vault as the operator** | **impossible natively** | **declarative** | yes |
+| **R3 vault as the operator** | **impossible natively** | **declarative [D]/[C]** | yes |
 | R4 bound by assertion | custom | flow variables | **[V]** `mintUntil` |
 | R5 synthesize login response | Lua | AssignMessage | yes |
 | R6 rewrite response body | Lua | JavaScript policy | yes |
@@ -346,7 +353,7 @@ dependency.
 | R8 bidirectional swap | Lua | custom | yes |
 | R9 upstream session | Lua | custom | yes |
 | R10 expiry vs forgery telemetry | custom | custom | **[V]** yes |
-| R11 no credential above boundary | yes | yes | **[M]** yes |
+| R11 no standing credential in identity or monitor zones | yes | yes | **[M]** yes |
 | **R12 no vendor egress** | **yes** | **no** | yes |
 
 ---
@@ -357,18 +364,18 @@ dependency.
 
 It is a stateful protocol adapter that happens to sit in a request path. Its
 difficulty is concentrated in R5–R9, and neither product provides any of them —
-both merely host them. The purpose-built proxy already built and measured is closer
-to correct than either, and its size is mostly a consequence of the SPA constraint
-rather than incidental complexity.
+both merely host them. The purpose-built proxy already built is closer to correct than
+either, and its size is mostly a consequence of the SPA constraint rather than incidental
+complexity.
 
 The two products fail differently, and neither failure is repairable by
 configuration:
 
 - **Kong** cannot express R3 through its own mechanisms, and its state model is
-  actively hazardous for R7. It wins decisively on R12.
-- **Apigee** expresses R3 cleanly and is the better authoring environment, but
+  actively hazardous for R7. It wins on R12.
+- **Apigee** appears to express R3 cleanly and is the better authoring environment, but
   requires a vendor control-plane dependency and outbound egress from the
-  restricted zone, which R12 forbids.
+  credential zone, which R12 forbids.
 
 **Recommendation: retain a purpose-built broker.** Adopt a gateway only for the
 roles below, where one genuinely adds something.
@@ -416,35 +423,11 @@ gateway work.
 
 ---
 
-## 9. Corrections log
 
-Kept because two of these were reversals that would have produced a confident wrong
-recommendation, and because the pattern of error is informative.
-
-1. **"Apigee reverses the verdict on Role B."** Overstated. It reverses it for
-   header injection, which is not the requirement. Against R5–R9 the two products
-   are close.
-2. **"PAM ownership makes the broker role irrelevant."** Wrong. PAM sits *upstream*
-   of the broker and does session recording and authentication; the vault retrieval
-   remains a distinct component. The broker was never a PAM replacement.
-3. **"Kong cannot do Role B in any edition."** Too strong without qualification. Its
-   *built-in* mechanisms cannot; custom Lua can. The correct claim is that Kong
-   provides nothing toward it.
-4. **H4 (DB-less forecloses per-user state)** — falsified. The `session` plugin
-   still stores state. Deployment mode is irrelevant to the binding constraint.
-5. **Evaluating header injection at all** — the root error. It came from reasoning
-   about the pattern rather than reading the implementation. The SPA constraint was
-   documented in the first 30 lines of `main.go` throughout.
-
-The common thread: four of five errors came from evaluating a model of the system
-instead of the system. The prototype's source settled each one in minutes.
-
----
-
-## 10. Open items
+## 9. Open items
 
 - ~~Whether an Apigee `ServiceCallout` response containing a credential can surface
-  in debug egress.~~ **Answered — see §4.** Yes by default; preventable by explicit
+  in debug egress.~~ **See §4.** Yes by default; preventable by explicit
   `DebugMask` `variables` entries naming the callout messages, or a `private.`
   prefix. Standard payload masking does **not** cover ServiceCallout. Encrypted KVM
   does not protect values in debug output.
@@ -456,6 +439,6 @@ instead of the system. The prototype's source settled each one in minutes.
   anything.
 - **[U]** Whether Apigee hybrid's runtime can operate with the management plane
   unreachable, and for how long.
-- **[U]** Whether the target environment's PAM performs injection high-side. If so
+- **[U]** Whether the target environment's PAM performs injection in the identity zone. If so
   it is disqualified by §1 before any of this matters.
 - **[U]** Licensing and cost for both, at the relevant scale.
