@@ -27,6 +27,8 @@ Put a credential broker on the appliance side of the inspecting boundary.
 
 The secret store authorises **the person, not merely the broker service**. That distinction preserves attribution: the access record says which engineer requested the appliance, not just which server made the network call.
 
+![Identity zone, monitor zone, and credential zone](diagrams/c0-trustzones.svg)
+
 Three network zones make the rule visible:
 
 - **Identity zone:** authenticates the engineer.
